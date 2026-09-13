@@ -5,6 +5,7 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    base: './', // Crucial for GitHub Pages to resolve assets correctly
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {

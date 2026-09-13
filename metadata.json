@@ -1,0 +1,6 @@
+{
+  "name": "دوري صوب الشامية",
+  "description": "المنصة الرسمية لدوري الدرجة الأولى للفِرَق الشعبية - الشامية",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

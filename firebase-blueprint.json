@@ -1,0 +1,231 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "System user with roles",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "maxLength": 200 },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "photoURL": { "type": "string", "maxLength": 500 },
+        "role": { "type": "string", "enum": ["super_admin", "tournament_manager", "disciplinary_committee", "media_manager", "stats_manager", "team"] },
+        "teamId": { "type": "string", "maxLength": 50 },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["email", "role", "createdAt", "updatedAt"]
+    },
+    "Team": {
+      "title": "Team",
+      "description": "Football team",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100 },
+        "logo": { "type": "string", "maxLength": 500 },
+        "coach": { "type": "string", "maxLength": 100 },
+        "captain": { "type": "string", "maxLength": 100 },
+        "establishedYear": { "type": "number" },
+        "played": { "type": "number" },
+        "won": { "type": "number" },
+        "drew": { "type": "number" },
+        "lost": { "type": "number" },
+        "goalsFor": { "type": "number" },
+        "goalsAgainst": { "type": "number" },
+        "points": { "type": "number" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["name", "createdAt", "updatedAt"]
+    },
+    "Player": {
+      "title": "Player",
+      "description": "Football player",
+      "type": "object",
+      "properties": {
+        "teamId": { "type": "string", "maxLength": 50 },
+        "name": { "type": "string", "maxLength": 100 },
+        "photo": { "type": "string", "maxLength": 500 },
+        "number": { "type": "number" },
+        "birthYear": { "type": "number" },
+        "position": { "type": "string", "maxLength": 50 },
+        "status": { "type": "string", "enum": ["active", "suspended", "excluded", "unregistered"] },
+        "goals": { "type": "number" },
+        "yellowCards": { "type": "number" },
+        "redCards": { "type": "number" },
+        "matchesPlayed": { "type": "number" },
+        "motm": { "type": "number" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["teamId", "name", "status", "createdAt", "updatedAt"]
+    },
+    "Match": {
+      "title": "Match",
+      "description": "A scheduled match between two teams",
+      "type": "object",
+      "properties": {
+        "homeTeamId": { "type": "string", "maxLength": 50 },
+        "awayTeamId": { "type": "string", "maxLength": 50 },
+        "date": { "type": "string", "maxLength": 50 },
+        "time": { "type": "string", "maxLength": 50 },
+        "stadiumId": { "type": "string", "maxLength": 50 },
+        "round": { "type": "string", "maxLength": 50 },
+        "status": { "type": "string", "enum": ["upcoming", "finished", "postponed", "cancelled"] },
+        "homeScore": { "type": "number" },
+        "awayScore": { "type": "number" },
+        "refereeId": { "type": "string", "maxLength": 50 },
+        "report": { "type": "string", "maxLength": 5000 },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["homeTeamId", "awayTeamId", "status", "createdAt", "updatedAt"]
+    },
+    "MatchEvent": {
+      "title": "Match Event",
+      "description": "Goal, card, or substitution in a match",
+      "type": "object",
+      "properties": {
+        "matchId": { "type": "string", "maxLength": 50 },
+        "teamId": { "type": "string", "maxLength": 50 },
+        "playerId": { "type": "string", "maxLength": 50 },
+        "type": { "type": "string", "enum": ["goal", "yellow_card", "red_card", "sub_in", "sub_out", "motm"] },
+        "minute": { "type": "number" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["matchId", "teamId", "playerId", "type", "minute", "createdAt"]
+    },
+    "DisciplinaryDecision": {
+      "title": "Disciplinary Decision",
+      "description": "Decision by committee",
+      "type": "object",
+      "properties": {
+        "number": { "type": "string", "maxLength": 50 },
+        "date": { "type": "string", "maxLength": 50 },
+        "targetType": { "type": "string", "enum": ["player", "coach", "team", "fans"] },
+        "targetId": { "type": "string", "maxLength": 50 },
+        "reason": { "type": "string", "maxLength": 1000 },
+        "penaltyType": { "type": "string", "maxLength": 100 },
+        "amount": { "type": "number" },
+        "matchId": { "type": "string", "maxLength": 50 },
+        "status": { "type": "string", "enum": ["published", "draft"] },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["targetType", "status", "createdAt", "updatedAt"]
+    },
+    "Objection": {
+      "title": "Objection",
+      "description": "Objection raised by a team",
+      "type": "object",
+      "properties": {
+        "teamId": { "type": "string", "maxLength": 50 },
+        "matchId": { "type": "string", "maxLength": 50 },
+        "type": { "type": "string", "maxLength": 100 },
+        "details": { "type": "string", "maxLength": 2000 },
+        "status": { "type": "string", "enum": ["pending", "investigating", "accepted", "rejected"] },
+        "decision": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["teamId", "matchId", "status", "createdAt", "updatedAt"]
+    },
+    "Announcement": {
+      "title": "Announcement",
+      "description": "Official announcements",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "date": { "type": "string", "maxLength": 50 },
+        "content": { "type": "string", "maxLength": 5000 },
+        "issuer": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["title", "content", "createdAt", "updatedAt"]
+    },
+    "News": {
+      "title": "News",
+      "description": "General news",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "date": { "type": "string", "maxLength": 50 },
+        "content": { "type": "string", "maxLength": 5000 },
+        "image": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["title", "content", "createdAt", "updatedAt"]
+    },
+    "Stadium": {
+      "title": "Stadium",
+      "description": "Stadium info",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100 },
+        "location": { "type": "string", "maxLength": 200 },
+        "capacity": { "type": "number" },
+        "image": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["name", "createdAt"]
+    },
+    "Referee": {
+      "title": "Referee",
+      "description": "Referee info",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100 },
+        "image": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["name", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "System users and their roles"
+    },
+    "/teams/{teamId}": {
+      "schema": "Team",
+      "description": "Football teams"
+    },
+    "/players/{playerId}": {
+      "schema": "Player",
+      "description": "Players in teams"
+    },
+    "/matches/{matchId}": {
+      "schema": "Match",
+      "description": "Matches"
+    },
+    "/matchEvents/{eventId}": {
+      "schema": "MatchEvent",
+      "description": "Events in matches"
+    },
+    "/disciplinaryDecisions/{decisionId}": {
+      "schema": "DisciplinaryDecision",
+      "description": "Disciplinary decisions"
+    },
+    "/objections/{objectionId}": {
+      "schema": "Objection",
+      "description": "Team objections"
+    },
+    "/announcements/{announcementId}": {
+      "schema": "Announcement",
+      "description": "Official announcements"
+    },
+    "/news/{newsId}": {
+      "schema": "News",
+      "description": "News articles"
+    },
+    "/stadiums/{stadiumId}": {
+      "schema": "Stadium",
+      "description": "Stadiums"
+    },
+    "/referees/{refereeId}": {
+      "schema": "Referee",
+      "description": "Referees"
+    }
+  }
+}

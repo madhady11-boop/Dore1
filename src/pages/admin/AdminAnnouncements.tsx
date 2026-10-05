@@ -1,210 +1,326 @@
-import { useState, useEffect } from 'react';
-import { collection, getDocs, addDoc, query, orderBy, serverTimestamp } from 'firebase/firestore';
+import { useMemo, useState } from 'react';
+import { addDoc, collection, deleteDoc, doc, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { CalendarDays, Edit3, Megaphone, Plus, Search, Trash2 } from 'lucide-react';
 import { db } from '../../firebase';
-import { Megaphone, Plus, CalendarDays, Edit, Trash2 } from 'lucide-react';
-import { clsx } from 'clsx';
+import { useTournamentData, type Announcement } from '../../hooks/useTournamentData';
+import { firebaseErrorMessage, timeAgo } from '../../lib/utils';
+import { Badge } from '../../components/ui/Badge';
+import { Button } from '../../components/ui/Button';
+import { EmptyState, LoadingBlock } from '../../components/ui/Feedback';
+import { Field, FormGrid, Input, SearchInput, Select, Textarea } from '../../components/ui/Form';
+import { GlassCard } from '../../components/ui/GlassCard';
+import { ConfirmDialog, Modal } from '../../components/ui/Modal';
+import { Tabs } from '../../components/ui/Tabs';
+import { useToast } from '../../components/ui/Toast';
+import { ImageUploader } from '../../components/media/ImageUploader';
 
-interface Announcement {
-  id: string;
+interface AnnouncementForm {
   title: string;
   date: string;
-  content: string;
   issuer: string;
-  createdAt: number;
+  content: string;
+  image: string;
+  status: 'published' | 'draft';
 }
 
+const emptyForm = (): AnnouncementForm => ({
+  title: '',
+  date: new Date().toISOString().slice(0, 10),
+  issuer: 'اللجنة المنظمة',
+  content: '',
+  image: '',
+  status: 'published',
+});
+
 export const AdminAnnouncements = () => {
-  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showAddForm, setShowAddForm] = useState(false);
-  const [newAnnouncement, setNewAnnouncement] = useState({
-    title: '',
-    date: new Date().toISOString().split('T')[0],
-    content: '',
-    issuer: 'اللجنة المنظمة',
-  });
+  const { announcements, loading, refresh } = useTournamentData();
+  const toast = useToast();
 
-  useEffect(() => {
-    fetchAnnouncements();
-  }, []);
+  const [filter, setFilter] = useState<'all' | 'published' | 'draft'>('all');
+  const [search, setSearch] = useState('');
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing, setEditing] = useState<Announcement | null>(null);
+  const [form, setForm] = useState<AnnouncementForm>(emptyForm());
+  const [saving, setSaving] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Announcement | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
-  const fetchAnnouncements = async () => {
-    setLoading(true);
+  const counts = useMemo(
+    () => ({
+      all: announcements.length,
+      published: announcements.filter((item) => item.status !== 'draft').length,
+      draft: announcements.filter((item) => item.status === 'draft').length,
+    }),
+    [announcements],
+  );
+
+  const filtered = useMemo(() => {
+    const term = search.trim();
+    return [...announcements]
+      .filter((item) => {
+        if (filter === 'published' && item.status === 'draft') return false;
+        if (filter === 'draft' && item.status !== 'draft') return false;
+        if (!term) return true;
+        return item.title?.includes(term) || item.content?.includes(term) || item.issuer?.includes(term);
+      })
+      .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  }, [announcements, filter, search]);
+
+  const openCreate = () => {
+    setEditing(null);
+    setForm(emptyForm());
+    setModalOpen(true);
+  };
+
+  const openEdit = (item: Announcement) => {
+    setEditing(item);
+    setForm({
+      title: item.title || '',
+      date: item.date || new Date().toISOString().slice(0, 10),
+      issuer: item.issuer || 'اللجنة المنظمة',
+      content: item.content || '',
+      image: item.image || '',
+      status: item.status === 'draft' ? 'draft' : 'published',
+    });
+    setModalOpen(true);
+  };
+
+  const handleSubmit = async () => {
+    if (!form.title.trim() || !form.content.trim()) {
+      toast.error('العنوان ونص التبليغ مطلوبان.');
+      return;
+    }
+    setSaving(true);
     try {
-      const q = query(collection(db, 'announcements'), orderBy('createdAt', 'desc'));
-      const querySnapshot = await getDocs(q);
-      const fetched: Announcement[] = [];
-      querySnapshot.forEach((doc) => {
-        fetched.push({ id: doc.id, ...doc.data() } as Announcement);
-      });
-      setAnnouncements(fetched);
+      const payload = {
+        title: form.title.trim(),
+        date: form.date,
+        issuer: form.issuer.trim() || 'اللجنة المنظمة',
+        content: form.content.trim(),
+        image: form.image,
+        status: form.status,
+        updatedAt: serverTimestamp(),
+      };
+      if (editing) {
+        await updateDoc(doc(db, 'announcements', editing.id), payload);
+        toast.success('تم تحديث التبليغ.');
+      } else {
+        await addDoc(collection(db, 'announcements'), { ...payload, createdAt: serverTimestamp() });
+        toast.success(form.status === 'draft' ? 'تم حفظ التبليغ كمسودة.' : 'تم نشر التبليغ رسمياً.');
+      }
+      setModalOpen(false);
+      refresh();
     } catch (error) {
-      console.error("Error fetching announcements: ", error);
+      toast.error(firebaseErrorMessage(error));
     } finally {
-      setLoading(false);
+      setSaving(false);
     }
   };
 
-  const handleAddAnnouncement = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
-      await addDoc(collection(db, 'announcements'), {
-        ...newAnnouncement,
-        createdAt: serverTimestamp(),
+      await deleteDoc(doc(db, 'announcements', deleteTarget.id));
+      toast.success('تم حذف التبليغ.');
+      setDeleteTarget(null);
+      refresh();
+    } catch (error) {
+      toast.error(firebaseErrorMessage(error));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const togglePublish = async (item: Announcement) => {
+    try {
+      await updateDoc(doc(db, 'announcements', item.id), {
+        status: item.status === 'draft' ? 'published' : 'draft',
         updatedAt: serverTimestamp(),
       });
-      setShowAddForm(false);
-      setNewAnnouncement({
-        title: '',
-        date: new Date().toISOString().split('T')[0],
-        content: '',
-        issuer: 'اللجنة المنظمة',
-      });
-      fetchAnnouncements();
+      toast.success(item.status === 'draft' ? 'تم نشر التبليغ.' : 'تم تحويل التبليغ إلى مسودة.');
+      refresh();
     } catch (error) {
-      console.error("Error adding announcement: ", error);
+      toast.error(firebaseErrorMessage(error));
     }
   };
 
   return (
-    <div className="space-y-8 max-w-7xl mx-auto">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-heading font-bold text-white mb-2">التبليغات الرسمية</h1>
-          <p className="text-zinc-400">إدارة ونشر التبليغات والقرارات للجمهور والفرق.</p>
+    <div className="space-y-7">
+      <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
+        <div className="space-y-1">
+          <h1 className="font-heading text-2xl font-black text-white">التبليغات والأخبار</h1>
+          <p className="text-sm text-ink-300">
+            انشر التبليغات الرسمية والقرارات الإعلامية مع صورة غلاف اختيارية، وتحكم بظهورها للمتابعين.
+          </p>
         </div>
-        <button 
-          onClick={() => setShowAddForm(!showAddForm)}
-          className="bg-primary text-black px-5 py-2.5 rounded-xl font-bold text-sm hover:bg-primary-dark transition-colors shadow-lg shadow-primary/20 flex items-center gap-2"
-        >
-          <Plus className="w-5 h-5" />
-          إضافة تبليغ جديد
-        </button>
+        <Button icon={<Plus className="h-4 w-4" />} onClick={openCreate}>
+          تبليغ جديد
+        </Button>
       </div>
 
-      {showAddForm && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 md:p-8 border-t-4 border-t-primary">
-          <h2 className="text-xl font-bold text-white mb-6">تفاصيل التبليغ الجديد</h2>
-          <form onSubmit={handleAddAnnouncement} className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="space-y-2 md:col-span-2">
-              <label className="text-sm font-medium text-zinc-400">عنوان التبليغ</label>
-              <input 
-                required
-                type="text" 
-                value={newAnnouncement.title}
-                onChange={(e) => setNewAnnouncement({...newAnnouncement, title: e.target.value})}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary transition-colors"
-                placeholder="مثال: تأجيل مباراة الجولة السادسة..."
-                maxLength={200}
-              />
-            </div>
-            
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-zinc-400">التاريخ</label>
-              <input 
-                required
-                type="date" 
-                value={newAnnouncement.date}
-                onChange={(e) => setNewAnnouncement({...newAnnouncement, date: e.target.value})}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary transition-colors"
-              />
-            </div>
-            
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-zinc-400">الجهة المصدرة</label>
-              <input 
-                required
-                type="text" 
-                value={newAnnouncement.issuer}
-                onChange={(e) => setNewAnnouncement({...newAnnouncement, issuer: e.target.value})}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary transition-colors"
-                placeholder="مثال: اللجنة المنظمة، لجنة الانضباط..."
-                maxLength={100}
-              />
-            </div>
-
-            <div className="space-y-2 md:col-span-2">
-              <label className="text-sm font-medium text-zinc-400">نص التبليغ</label>
-              <textarea 
-                required
-                rows={5}
-                value={newAnnouncement.content}
-                onChange={(e) => setNewAnnouncement({...newAnnouncement, content: e.target.value})}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary transition-colors resize-none leading-relaxed"
-                placeholder="اكتب التفاصيل هنا..."
-                maxLength={5000}
-              />
-            </div>
-
-            <div className="md:col-span-2 flex justify-end gap-3 mt-4">
-              <button 
-                type="button" 
-                onClick={() => setShowAddForm(false)}
-                className="px-6 py-3 rounded-xl border border-zinc-800 text-zinc-300 hover:bg-zinc-800 transition-colors font-medium"
-              >
-                إلغاء
-              </button>
-              <button 
-                type="submit"
-                className="px-6 py-3 rounded-xl bg-primary text-black hover:bg-primary-dark transition-colors font-bold"
-              >
-                نشر التبليغ
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
+      <GlassCard variant="soft" padding="md" className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <Tabs<'all' | 'published' | 'draft'>
+          value={filter}
+          onChange={setFilter}
+          items={[
+            { value: 'all', label: 'الكل', count: counts.all },
+            { value: 'published', label: 'منشورة', count: counts.published },
+            { value: 'draft', label: 'مسودات', count: counts.draft },
+          ]}
+        />
+        <SearchInput
+          placeholder="ابحث في التبليغات..."
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          className="w-full lg:w-72"
+        />
+      </GlassCard>
 
       {loading ? (
-        <div className="flex justify-center p-12">
-          <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
-        </div>
+        <LoadingBlock rows={4} label="جاري تحميل التبليغات..." />
+      ) : filtered.length === 0 ? (
+        <EmptyState
+          title="لا توجد تبليغات"
+          description="ابدأ بنشر أول تبليغ رسمي للبطولة."
+          icon={<Megaphone className="h-6 w-6" />}
+          action={
+            <Button variant="glass" icon={<Plus className="h-4 w-4" />} onClick={openCreate}>
+              تبليغ جديد
+            </Button>
+          }
+        />
       ) : (
-        <div className="space-y-4">
-          {announcements.map((announcement) => (
-            <div key={announcement.id} className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 hover:border-zinc-700 transition-colors">
-              <div className="flex flex-col md:flex-row gap-4 items-start md:items-center justify-between mb-4">
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-full bg-primary/10 text-primary flex items-center justify-center shrink-0 border border-primary/20">
-                    <Megaphone className="w-5 h-5" />
+        <div className="grid gap-5 xl:grid-cols-2">
+          {filtered.map((item) => (
+            <GlassCard key={item.id} hover padding="md" className="space-y-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge tone={item.status === 'draft' ? 'amber' : 'emerald'} size="sm">
+                      {item.status === 'draft' ? 'مسودة' : 'منشور'}
+                    </Badge>
+                    <Badge tone="gold" size="sm">
+                      {item.issuer || 'اللجنة المنظمة'}
+                    </Badge>
+                    <span className="inline-flex items-center gap-1 text-[11px] text-ink-400">
+                      <CalendarDays className="h-3 w-3" />
+                      {item.date || timeAgo(item.createdAt)}
+                    </span>
                   </div>
-                  <div>
-                    <h3 className="text-lg font-bold text-white">{announcement.title}</h3>
-                    <div className="flex items-center gap-3 text-sm text-zinc-500 mt-1">
-                      <span className="flex items-center gap-1"><CalendarDays className="w-4 h-4" /> {announcement.date}</span>
-                      <span className="w-1 h-1 rounded-full bg-zinc-700" />
-                      <span>{announcement.issuer}</span>
-                    </div>
-                  </div>
+                  <h3 className="font-heading text-lg font-bold text-white">{item.title}</h3>
                 </div>
-                
-                <div className="flex items-center gap-2 self-end md:self-auto">
-                  <button className="p-2 text-zinc-400 hover:text-primary bg-zinc-950 rounded-lg border border-zinc-800 transition-colors">
-                    <Edit className="w-4 h-4" />
-                  </button>
-                  <button className="p-2 text-zinc-400 hover:text-accent-red bg-zinc-950 rounded-lg border border-zinc-800 transition-colors">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                <div className="flex shrink-0 gap-1.5">
+                  <Button size="icon-sm" variant="glass" onClick={() => openEdit(item)} aria-label="تعديل">
+                    <Edit3 className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button size="icon-sm" variant="danger" onClick={() => setDeleteTarget(item)} aria-label="حذف">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
                 </div>
               </div>
-              
-              <div className="bg-zinc-950/50 p-4 rounded-xl border border-zinc-800/50">
-                <p className="text-zinc-300 text-sm leading-relaxed whitespace-pre-wrap">
-                  {announcement.content}
-                </p>
-              </div>
-            </div>
+
+              {item.image && (
+                <img
+                  src={item.image}
+                  alt={item.title}
+                  className="h-40 w-full rounded-2xl border border-white/10 object-cover"
+                  loading="lazy"
+                />
+              )}
+
+              <p className="line-clamp-3 whitespace-pre-line text-xs leading-relaxed text-ink-200">{item.content}</p>
+
+              <Button size="sm" variant="ghost" onClick={() => void togglePublish(item)}>
+                {item.status === 'draft' ? 'نشر التبليغ الآن' : 'تحويل إلى مسودة'}
+              </Button>
+            </GlassCard>
           ))}
-          
-          {announcements.length === 0 && (
-            <div className="text-center py-16 bg-zinc-900 border border-zinc-800 rounded-3xl">
-              <Megaphone className="w-12 h-12 text-zinc-700 mx-auto mb-4" />
-              <h3 className="text-lg font-bold text-white mb-2">لا توجد تبليغات</h3>
-              <p className="text-zinc-500">قم بإضافة التبليغ الأول من الزر أعلاه.</p>
-            </div>
-          )}
         </div>
       )}
+
+      <Modal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        title={editing ? 'تعديل التبليغ' : 'تبليغ رسمي جديد'}
+        subtitle="يظهر التبليغ في صفحة التبليغات وفي الصفحة الرئيسية عند النشر."
+        icon={<Megaphone className="h-5 w-5" />}
+        size="lg"
+        footer={
+          <div className="flex flex-wrap justify-end gap-3">
+            <Button variant="ghost" onClick={() => setModalOpen(false)} disabled={saving}>
+              إلغاء
+            </Button>
+            <Button loading={saving} onClick={() => void handleSubmit()}>
+              {form.status === 'draft' ? 'حفظ كمسودة' : editing ? 'حفظ ونشر' : 'نشر التبليغ'}
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-6">
+          <ImageUploader
+            folder="news"
+            shape="wide"
+            label="صورة الغلاف (اختياري)"
+            value={form.image}
+            onChange={(image) => setForm((current) => ({ ...current, image }))}
+            recommended="يفضّل صورة أفقية بنسبة 16:9 لتظهر بشكل مثالي في الصفحة الرئيسية."
+          />
+
+          <FormGrid>
+            <Field label="عنوان التبليغ" required>
+              <Input
+                value={form.title}
+                onChange={(event) => setForm({ ...form, title: event.target.value })}
+                placeholder="مثال: تعديل موعد مباراة الجولة القادمة"
+              />
+            </Field>
+            <Field label="الجهة المُصدِرة">
+              <Input
+                value={form.issuer}
+                onChange={(event) => setForm({ ...form, issuer: event.target.value })}
+                placeholder="اللجنة المنظمة"
+              />
+            </Field>
+            <Field label="التاريخ">
+              <Input type="date" value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} />
+            </Field>
+            <Field label="الحالة">
+              <Select
+                value={form.status}
+                onChange={(event) => setForm({ ...form, status: event.target.value as 'published' | 'draft' })}
+              >
+                <option value="published">منشور للجمهور</option>
+                <option value="draft">مسودة (غير مرئي)</option>
+              </Select>
+            </Field>
+          </FormGrid>
+
+          <Field label="نص التبليغ" required hint="يمكنك استخدام الأسطر المتعددة لتنظيم نص القرار.">
+            <Textarea
+              rows={8}
+              value={form.content}
+              onChange={(event) => setForm({ ...form, content: event.target.value })}
+              placeholder="نص التبليغ الرسمي..."
+            />
+          </Field>
+        </div>
+      </Modal>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="حذف التبليغ"
+        message={`سيتم حذف "${deleteTarget?.title}" نهائياً.`}
+        confirmLabel="حذف"
+        loading={deleting}
+        onConfirm={() => void handleDelete()}
+        onCancel={() => setDeleteTarget(null)}
+      />
+
+      <GlassCard variant="soft" padding="md" className="flex flex-wrap items-center gap-3 text-xs text-ink-300">
+        <Search className="h-4 w-4 text-gold-300" />
+        يمكن لمدير الإعلام نشر التبليغات؛ أما بقية الأدوار فتظهر لهم حسب الصلاحيات.
+      </GlassCard>
     </div>
   );
 };

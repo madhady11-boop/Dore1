@@ -1,369 +1,467 @@
-import { useState, useEffect } from 'react';
-import { collection, getDocs, addDoc, updateDoc, doc, serverTimestamp, query, orderBy } from 'firebase/firestore';
+import { useMemo, useState } from 'react';
+import { addDoc, collection, deleteDoc, doc, serverTimestamp, updateDoc, writeBatch } from 'firebase/firestore';
+import { CalendarDays, Calculator, Edit3, Filter, Plus, Trash2, Trophy } from 'lucide-react';
 import { db } from '../../firebase';
-import { CalendarDays, Plus, Edit, CheckCircle, Clock, XCircle, AlertCircle } from 'lucide-react';
-import { clsx } from 'clsx';
+import { useTournamentData, indexTeams } from '../../hooks/useTournamentData';
+import { computeTeamAggregates, sortMatchesDesc, type MatchLike } from '../../lib/stats';
+import { MATCH_STATUS } from '../../lib/constants';
+import { firebaseErrorMessage, formatDate } from '../../lib/utils';
+import { Badge } from '../../components/ui/Badge';
+import { Button } from '../../components/ui/Button';
+import { EmptyState, LoadingBlock } from '../../components/ui/Feedback';
+import { Field, FormGrid, Input, NumberStepper, SearchInput, Select } from '../../components/ui/Form';
+import { GlassCard } from '../../components/ui/GlassCard';
+import { ConfirmDialog, Modal } from '../../components/ui/Modal';
+import { Tabs } from '../../components/ui/Tabs';
+import { useToast } from '../../components/ui/Toast';
+import { MatchCard } from '../../components/football/MatchCard';
+import { TeamBadge } from '../../components/football/Avatars';
 
-interface Team {
-  id: string;
-  name: string;
-}
-
-interface Match {
-  id: string;
+interface MatchFormState {
   homeTeamId: string;
   awayTeamId: string;
   date: string;
   time: string;
   round: string;
   stadiumId: string;
-  status: 'upcoming' | 'finished' | 'postponed' | 'cancelled';
-  homeScore?: number;
-  awayScore?: number;
+  refereeId: string;
 }
 
+const emptyForm = (): MatchFormState => ({
+  homeTeamId: '',
+  awayTeamId: '',
+  date: new Date().toISOString().slice(0, 10),
+  time: '20:30',
+  round: '',
+  stadiumId: 'ملعب صوب الشامية',
+  refereeId: '',
+});
+
 export const AdminMatches = () => {
-  const [matches, setMatches] = useState<Match[]>([]);
-  const [teams, setTeams] = useState<Team[]>([]);
-  const [loading, setLoading] = useState(true);
-  
-  // Add Match State
-  const [showAddForm, setShowAddForm] = useState(false);
-  const [newMatch, setNewMatch] = useState({
-    homeTeamId: '',
-    awayTeamId: '',
-    date: '',
-    time: '',
-    round: '',
-    stadiumId: 'ملعب صوب الشامية',
-  });
+  const { teams, matches, referees, loading, refresh } = useTournamentData();
+  const teamsById = useMemo(() => indexTeams(teams), [teams]);
+  const toast = useToast();
 
-  // Edit Match State
-  const [editingMatch, setEditingMatch] = useState<Match | null>(null);
-  const [editScore, setEditScore] = useState({ homeScore: 0, awayScore: 0, status: 'finished' as Match['status'] });
+  const [statusFilter, setStatusFilter] = useState<'all' | MatchLike['status']>('all');
+  const [search, setSearch] = useState('');
+  const [createOpen, setCreateOpen] = useState(false);
+  const [form, setForm] = useState<MatchFormState>(emptyForm());
+  const [saving, setSaving] = useState(false);
+  const [resultTarget, setResultTarget] = useState<MatchLike | null>(null);
+  const [resultForm, setResultForm] = useState({ homeScore: 0, awayScore: 0, status: 'finished' as MatchLike['status'] });
+  const [savingResult, setSavingResult] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<MatchLike | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [recomputing, setRecomputing] = useState(false);
 
-  useEffect(() => {
-    fetchData();
-  }, []);
+  const filtered = useMemo(() => {
+    const term = search.trim();
+    return sortMatchesDesc(matches).filter((match) => {
+      if (statusFilter !== 'all' && match.status !== statusFilter) return false;
+      if (!term) return true;
+      const home = teamsById[match.homeTeamId]?.name || '';
+      const away = teamsById[match.awayTeamId]?.name || '';
+      return `${home} ${away} ${match.round || ''}`.includes(term);
+    });
+  }, [matches, statusFilter, search, teamsById]);
 
-  const fetchData = async () => {
-    setLoading(true);
-    try {
-      // Fetch Teams
-      const teamsSnapshot = await getDocs(query(collection(db, 'teams'), orderBy('name')));
-      const fetchedTeams: Team[] = [];
-      teamsSnapshot.forEach((doc) => fetchedTeams.push({ id: doc.id, name: doc.data().name }));
-      setTeams(fetchedTeams);
-
-      // Fetch Matches
-      const matchesSnapshot = await getDocs(query(collection(db, 'matches'), orderBy('createdAt', 'desc')));
-      const fetchedMatches: Match[] = [];
-      matchesSnapshot.forEach((doc) => fetchedMatches.push({ id: doc.id, ...doc.data() } as Match));
-      setMatches(fetchedMatches);
-    } catch (error) {
-      console.error("Error fetching data: ", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleAddMatch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (newMatch.homeTeamId === newMatch.awayTeamId) {
-      alert('لا يمكن اختيار نفس الفريق للمواجهة');
+  const handleCreate = async () => {
+    if (!form.homeTeamId || !form.awayTeamId) {
+      toast.error('اختر الفريقين المتواجهين.');
       return;
     }
+    if (form.homeTeamId === form.awayTeamId) {
+      toast.error('لا يمكن اختيار نفس الفريق في المباراة.');
+      return;
+    }
+    setSaving(true);
     try {
       await addDoc(collection(db, 'matches'), {
-        ...newMatch,
+        homeTeamId: form.homeTeamId,
+        awayTeamId: form.awayTeamId,
+        date: form.date,
+        time: form.time,
+        round: form.round.trim() || 'جولة غير محددة',
+        stadiumId: form.stadiumId.trim() || 'ملعب صوب الشامية',
+        refereeId: form.refereeId,
         status: 'upcoming',
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
-      setShowAddForm(false);
-      setNewMatch({ homeTeamId: '', awayTeamId: '', date: '', time: '', round: '', stadiumId: 'ملعب صوب الشامية' });
-      fetchData();
+      toast.success('تمت جدولة المباراة.');
+      setCreateOpen(false);
+      setForm(emptyForm());
+      refresh();
     } catch (error) {
-      console.error("Error adding match: ", error);
+      toast.error(firebaseErrorMessage(error));
+    } finally {
+      setSaving(false);
     }
   };
 
-  const handleUpdateMatch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingMatch) return;
+  const openResult = (match: MatchLike) => {
+    setResultTarget(match);
+    setResultForm({
+      homeScore: match.homeScore ?? 0,
+      awayScore: match.awayScore ?? 0,
+      status: match.status === 'upcoming' ? 'finished' : match.status,
+    });
+  };
+
+  const handleSaveResult = async () => {
+    if (!resultTarget) return;
+    setSavingResult(true);
     try {
-      await updateDoc(doc(db, 'matches', editingMatch.id), {
-        homeScore: editScore.homeScore,
-        awayScore: editScore.awayScore,
-        status: editScore.status,
+      await updateDoc(doc(db, 'matches', resultTarget.id), {
+        homeScore: Number(resultForm.homeScore) || 0,
+        awayScore: Number(resultForm.awayScore) || 0,
+        status: resultForm.status,
         updatedAt: serverTimestamp(),
       });
-      setEditingMatch(null);
-      fetchData();
+      toast.success('تم حفظ النتيجة وتحديث المباراة.');
+      setResultTarget(null);
+      refresh();
     } catch (error) {
-      console.error("Error updating match: ", error);
+      toast.error(firebaseErrorMessage(error));
+    } finally {
+      setSavingResult(false);
     }
   };
 
-  const getTeamName = (id: string) => {
-    return teams.find(t => t.id === id)?.name || 'فريق غير معروف';
-  };
-
-  const getStatusBadge = (status: Match['status']) => {
-    switch (status) {
-      case 'upcoming': return <span className="flex items-center gap-1 text-blue-400 bg-blue-400/10 px-3 py-1 rounded-full text-xs font-bold"><Clock className="w-3 h-3" /> قادمة</span>;
-      case 'finished': return <span className="flex items-center gap-1 text-accent-green bg-accent-green/10 px-3 py-1 rounded-full text-xs font-bold"><CheckCircle className="w-3 h-3" /> منتهية</span>;
-      case 'postponed': return <span className="flex items-center gap-1 text-yellow-500 bg-yellow-500/10 px-3 py-1 rounded-full text-xs font-bold"><AlertCircle className="w-3 h-3" /> مؤجلة</span>;
-      case 'cancelled': return <span className="flex items-center gap-1 text-accent-red bg-accent-red/10 px-3 py-1 rounded-full text-xs font-bold"><XCircle className="w-3 h-3" /> ملغاة</span>;
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await deleteDoc(doc(db, 'matches', deleteTarget.id));
+      toast.success('تم حذف المباراة.');
+      setDeleteTarget(null);
+      refresh();
+    } catch (error) {
+      toast.error(firebaseErrorMessage(error));
+    } finally {
+      setDeleting(false);
     }
   };
+
+  const handleRecompute = async () => {
+    const patches = computeTeamAggregates(teams, matches);
+    if (patches.length === 0) {
+      toast.error('لا توجد فرق لاحتساب ترتيبها.');
+      return;
+    }
+    setRecomputing(true);
+    try {
+      const batch = writeBatch(db);
+      patches.forEach((patch) => {
+        batch.update(doc(db, 'teams', patch.teamId), {
+          played: patch.played,
+          won: patch.won,
+          drew: patch.drew,
+          lost: patch.lost,
+          goalsFor: patch.goalsFor,
+          goalsAgainst: patch.goalsAgainst,
+          points: patch.points,
+          updatedAt: serverTimestamp(),
+        });
+      });
+      await batch.commit();
+      toast.success('تم إعادة احتساب جدول الترتيب من نتائج المباريات.');
+      refresh();
+    } catch (error) {
+      toast.error(
+        `${firebaseErrorMessage(error)} — قد تحتاج صلاحية «مدير البطولة» لتحديث إحصائيات الفرق.`,
+      );
+    } finally {
+      setRecomputing(false);
+    }
+  };
+
+  const counts = useMemo(
+    () => ({
+      all: matches.length,
+      upcoming: matches.filter((m) => m.status === 'upcoming').length,
+      finished: matches.filter((m) => m.status === 'finished').length,
+      postponed: matches.filter((m) => m.status === 'postponed').length,
+      cancelled: matches.filter((m) => m.status === 'cancelled').length,
+    }),
+    [matches],
+  );
 
   return (
-    <div className="space-y-8 max-w-7xl mx-auto">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-heading font-bold text-white mb-2">إدارة المباريات</h1>
-          <p className="text-zinc-400">جدولة المباريات، تحديث النتائج، وإدارة الأحداث.</p>
+    <div className="space-y-7">
+      <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
+        <div className="space-y-1">
+          <h1 className="font-heading text-2xl font-black text-white">المباريات والنتائج</h1>
+          <p className="text-sm text-ink-300">
+            جدولة الجولات، إدخال النتائج، وإعادة احتساب جدول الترتيب مباشرة من النتائج المعتمدة.
+          </p>
         </div>
-        <button 
-          onClick={() => setShowAddForm(!showAddForm)}
-          className="bg-primary text-black px-5 py-2.5 rounded-xl font-bold text-sm hover:bg-primary-dark transition-colors shadow-lg shadow-primary/20 flex items-center gap-2"
-        >
-          <Plus className="w-5 h-5" />
-          جدولة مباراة جديدة
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="glass"
+            icon={<Calculator className="h-4 w-4" />}
+            loading={recomputing}
+            onClick={() => void handleRecompute()}
+          >
+            إعادة احتساب الترتيب
+          </Button>
+          <Button icon={<Plus className="h-4 w-4" />} onClick={() => setCreateOpen(true)}>
+            مباراة جديدة
+          </Button>
+        </div>
       </div>
 
-      {showAddForm && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 md:p-8 border-t-4 border-t-primary">
-          <h2 className="text-xl font-bold text-white mb-6">تفاصيل المباراة الجديدة</h2>
-          <form onSubmit={handleAddMatch} className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-zinc-400">الفريق المضيف (الأول)</label>
-              <select 
-                required
-                value={newMatch.homeTeamId}
-                onChange={(e) => setNewMatch({...newMatch, homeTeamId: e.target.value})}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary transition-colors"
-              >
-                <option value="">اختر الفريق...</option>
-                {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
-            </div>
-            
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-zinc-400">الفريق الضيف (الثاني)</label>
-              <select 
-                required
-                value={newMatch.awayTeamId}
-                onChange={(e) => setNewMatch({...newMatch, awayTeamId: e.target.value})}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary transition-colors"
-              >
-                <option value="">اختر الفريق...</option>
-                {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-zinc-400">التاريخ</label>
-              <input 
-                required
-                type="date" 
-                value={newMatch.date}
-                onChange={(e) => setNewMatch({...newMatch, date: e.target.value})}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary transition-colors"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-zinc-400">الوقت</label>
-              <input 
-                required
-                type="time" 
-                value={newMatch.time}
-                onChange={(e) => setNewMatch({...newMatch, time: e.target.value})}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary transition-colors"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-zinc-400">الجولة / المرحلة</label>
-              <input 
-                required
-                type="text" 
-                value={newMatch.round}
-                onChange={(e) => setNewMatch({...newMatch, round: e.target.value})}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary transition-colors"
-                placeholder="مثال: الجولة الأولى، نصف النهائي..."
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-zinc-400">الملعب</label>
-              <input 
-                required
-                type="text" 
-                value={newMatch.stadiumId}
-                onChange={(e) => setNewMatch({...newMatch, stadiumId: e.target.value})}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary transition-colors"
-                placeholder="اسم الملعب"
-              />
-            </div>
-
-            <div className="md:col-span-2 flex justify-end gap-3 mt-4">
-              <button 
-                type="button" 
-                onClick={() => setShowAddForm(false)}
-                className="px-6 py-3 rounded-xl border border-zinc-800 text-zinc-300 hover:bg-zinc-800 transition-colors font-medium"
-              >
-                إلغاء
-              </button>
-              <button 
-                type="submit"
-                className="px-6 py-3 rounded-xl bg-primary text-black hover:bg-primary-dark transition-colors font-bold"
-              >
-                جدولة المباراة
-              </button>
-            </div>
-          </form>
+      <GlassCard variant="soft" padding="md" className="space-y-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <Tabs<'all' | MatchLike['status']>
+            value={statusFilter}
+            onChange={setStatusFilter}
+            items={[
+              { value: 'all', label: 'الكل', count: counts.all },
+              { value: 'upcoming', label: 'قادمة', count: counts.upcoming },
+              { value: 'finished', label: 'منتهية', count: counts.finished },
+              { value: 'postponed', label: 'مؤجلة', count: counts.postponed },
+              { value: 'cancelled', label: 'ملغاة', count: counts.cancelled },
+            ]}
+          />
+          <SearchInput
+            placeholder="ابحث عن فريق أو جولة..."
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            className="w-full lg:w-72"
+          />
         </div>
-      )}
-
-      {/* Edit Match Modal */}
-      {editingMatch && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 md:p-8 w-full max-w-lg">
-            <h2 className="text-xl font-bold text-white mb-6">تحديث نتيجة المباراة</h2>
-            
-            <div className="flex items-center justify-between mb-8 bg-zinc-950 p-4 rounded-2xl border border-zinc-800">
-              <div className="text-center flex-1">
-                <div className="font-bold text-white mb-2">{getTeamName(editingMatch.homeTeamId)}</div>
-                <input 
-                  type="number" 
-                  min="0"
-                  value={editScore.homeScore}
-                  onChange={(e) => setEditScore({...editScore, homeScore: parseInt(e.target.value) || 0})}
-                  className="w-16 h-16 text-center text-3xl font-heading font-black bg-zinc-900 border border-zinc-700 rounded-xl text-white focus:outline-none focus:border-primary mx-auto"
-                />
-              </div>
-              <div className="text-zinc-500 font-bold text-xl px-4">-</div>
-              <div className="text-center flex-1">
-                <div className="font-bold text-white mb-2">{getTeamName(editingMatch.awayTeamId)}</div>
-                <input 
-                  type="number" 
-                  min="0"
-                  value={editScore.awayScore}
-                  onChange={(e) => setEditScore({...editScore, awayScore: parseInt(e.target.value) || 0})}
-                  className="w-16 h-16 text-center text-3xl font-heading font-black bg-zinc-900 border border-zinc-700 rounded-xl text-white focus:outline-none focus:border-primary mx-auto"
-                />
-              </div>
-            </div>
-
-            <form onSubmit={handleUpdateMatch} className="space-y-6">
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-zinc-400">حالة المباراة</label>
-                <select 
-                  value={editScore.status}
-                  onChange={(e) => setEditScore({...editScore, status: e.target.value as Match['status']})}
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary transition-colors"
-                >
-                  <option value="finished">منتهية</option>
-                  <option value="upcoming">قادمة (لم تبدأ)</option>
-                  <option value="postponed">مؤجلة</option>
-                  <option value="cancelled">ملغاة</option>
-                </select>
-              </div>
-
-              <div className="flex justify-end gap-3 pt-4">
-                <button 
-                  type="button" 
-                  onClick={() => setEditingMatch(null)}
-                  className="px-6 py-3 rounded-xl border border-zinc-800 text-zinc-300 hover:bg-zinc-800 transition-colors font-medium"
-                >
-                  إلغاء
-                </button>
-                <button 
-                  type="submit"
-                  className="px-6 py-3 rounded-xl bg-primary text-black hover:bg-primary-dark transition-colors font-bold"
-                >
-                  حفظ النتيجة
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+        <p className="flex items-center gap-2 text-[11px] text-ink-400">
+          <Filter className="h-3.5 w-3.5" />
+          {filtered.length} مباراة معروضة
+        </p>
+      </GlassCard>
 
       {loading ? (
-        <div className="flex justify-center p-12">
-          <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
-        </div>
+        <LoadingBlock rows={6} label="جاري تحميل المباريات..." />
+      ) : filtered.length === 0 ? (
+        <EmptyState
+          title="لا توجد مباريات"
+          description="ابدأ بجدولة مباراة جديدة بين فريقين من الفرق المسجلة."
+          icon={<CalendarDays className="h-6 w-6" />}
+          action={
+            <Button variant="glass" icon={<Plus className="h-4 w-4" />} onClick={() => setCreateOpen(true)}>
+              جدولة مباراة
+            </Button>
+          }
+        />
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {matches.map((match) => (
-            <div key={match.id} className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 hover:border-zinc-700 transition-colors">
-              <div className="flex justify-between items-start mb-6">
-                <div className="flex items-center gap-3 text-sm text-zinc-400">
-                  <CalendarDays className="w-4 h-4" />
-                  <span>{match.date} • {match.time}</span>
-                  <span className="w-1 h-1 rounded-full bg-zinc-700" />
-                  <span>{match.round}</span>
-                </div>
-                {getStatusBadge(match.status)}
-              </div>
-
-              <div className="flex items-center justify-between mb-8 px-4">
-                <div className="flex flex-col items-center flex-1">
-                  <div className="w-12 h-12 bg-zinc-950 border border-zinc-800 rounded-full flex items-center justify-center mb-3 text-xl">🦅</div>
-                  <span className="font-bold text-white text-center line-clamp-1">{getTeamName(match.homeTeamId)}</span>
-                </div>
-                
-                <div className="px-6 flex flex-col items-center justify-center">
-                  {match.status === 'finished' ? (
-                    <div className="flex items-center gap-3 text-3xl font-heading font-black text-white bg-zinc-950 px-4 py-2 rounded-2xl border border-zinc-800">
-                      <span>{match.homeScore}</span>
-                      <span className="text-zinc-600">-</span>
-                      <span>{match.awayScore}</span>
-                    </div>
-                  ) : (
-                    <div className="text-xl font-heading font-black text-zinc-600">VS</div>
-                  )}
-                </div>
-
-                <div className="flex flex-col items-center flex-1">
-                  <div className="w-12 h-12 bg-zinc-950 border border-zinc-800 rounded-full flex items-center justify-center mb-3 text-xl">⚡</div>
-                  <span className="font-bold text-white text-center line-clamp-1">{getTeamName(match.awayTeamId)}</span>
-                </div>
-              </div>
-              
-              <div className="pt-4 border-t border-zinc-800/50 flex gap-2">
-                <button 
-                  onClick={() => {
-                    setEditingMatch(match);
-                    setEditScore({ 
-                      homeScore: match.homeScore || 0, 
-                      awayScore: match.awayScore || 0, 
-                      status: match.status 
-                    });
-                  }}
-                  className="flex-1 bg-zinc-950 hover:bg-zinc-800 text-white border border-zinc-800 py-2.5 rounded-xl text-sm font-medium transition-colors flex items-center justify-center gap-2"
-                >
-                  <Edit className="w-4 h-4" />
-                  تحديث النتيجة
-                </button>
-              </div>
-            </div>
-          ))}
-
-          {matches.length === 0 && (
-             <div className="col-span-full py-16 text-center bg-zinc-900 border border-zinc-800 rounded-3xl">
-               <CalendarDays className="w-12 h-12 text-zinc-700 mx-auto mb-4" />
-               <h3 className="text-lg font-bold text-white mb-2">لا توجد مباريات</h3>
-               <p className="text-zinc-500">قم بجدولة المباراة الأولى عبر الزر أعلاه.</p>
-             </div>
-          )}
+        <div className="grid gap-5 xl:grid-cols-2">
+          {filtered.map((match) => {
+            const meta = MATCH_STATUS[match.status] || MATCH_STATUS.upcoming;
+            return (
+              <MatchCard
+                key={match.id}
+                match={match}
+                homeTeam={teamsById[match.homeTeamId]}
+                awayTeam={teamsById[match.awayTeamId]}
+                actions={
+                  <>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      icon={<Edit3 className="h-3.5 w-3.5" />}
+                      onClick={() => openResult(match)}
+                    >
+                      {match.status === 'finished' ? 'تعديل النتيجة' : 'إدخال النتيجة'}
+                    </Button>
+                    <Badge tone="neutral" size="sm" className={meta.className}>
+                      {meta.label}
+                    </Badge>
+                    <Button
+                      size="icon-sm"
+                      variant="danger"
+                      className="ms-auto"
+                      onClick={() => setDeleteTarget(match)}
+                      aria-label="حذف المباراة"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </>
+                }
+              />
+            );
+          })}
         </div>
       )}
+
+      {/* Create match modal */}
+      <Modal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        title="جدولة مباراة جديدة"
+        subtitle="ستظهر المباراة في صفحة المباريات وفي الصفحة الرئيسية مباشرة."
+        icon={<Plus className="h-5 w-5" />}
+        size="lg"
+        footer={
+          <div className="flex justify-end gap-3">
+            <Button variant="ghost" onClick={() => setCreateOpen(false)} disabled={saving}>
+              إلغاء
+            </Button>
+            <Button loading={saving} onClick={() => void handleCreate()}>
+              جدولة المباراة
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-6">
+          <div className="grid items-center gap-4 rounded-3xl border border-white/8 bg-white/4 p-4 sm:grid-cols-[1fr_auto_1fr]">
+            <div className="flex flex-col items-center gap-2">
+              <TeamBadge name={teamsById[form.homeTeamId]?.name || 'المضيف'} logo={teamsById[form.homeTeamId]?.logo} size="md" />
+              <span className="text-xs font-bold text-white">
+                {teamsById[form.homeTeamId]?.name || 'الفريق المضيف'}
+              </span>
+            </div>
+            <span className="text-center font-heading text-lg font-black text-gold-300">VS</span>
+            <div className="flex flex-col items-center gap-2">
+              <TeamBadge name={teamsById[form.awayTeamId]?.name || 'الضيف'} logo={teamsById[form.awayTeamId]?.logo} size="md" />
+              <span className="text-xs font-bold text-white">
+                {teamsById[form.awayTeamId]?.name || 'الفريق الضيف'}
+              </span>
+            </div>
+          </div>
+
+          <FormGrid>
+            <Field label="الفريق المضيف" required>
+              <Select
+                value={form.homeTeamId}
+                onChange={(event) => setForm({ ...form, homeTeamId: event.target.value })}
+              >
+                <option value="">اختر الفريق...</option>
+                {teams.map((team) => (
+                  <option key={team.id} value={team.id}>
+                    {team.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="الفريق الضيف" required>
+              <Select
+                value={form.awayTeamId}
+                onChange={(event) => setForm({ ...form, awayTeamId: event.target.value })}
+              >
+                <option value="">اختر الفريق...</option>
+                {teams.map((team) => (
+                  <option key={team.id} value={team.id}>
+                    {team.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="التاريخ">
+              <Input type="date" value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} />
+            </Field>
+            <Field label="الوقت">
+              <Input type="time" value={form.time} onChange={(event) => setForm({ ...form, time: event.target.value })} />
+            </Field>
+            <Field label="الجولة" hint="مثال: الجولة السابعة، ربع النهائي...">
+              <Input value={form.round} onChange={(event) => setForm({ ...form, round: event.target.value })} />
+            </Field>
+            <Field label="الملعب">
+              <Input value={form.stadiumId} onChange={(event) => setForm({ ...form, stadiumId: event.target.value })} />
+            </Field>
+            <Field label="الحكم (اختياري)">
+              <Select value={form.refereeId} onChange={(event) => setForm({ ...form, refereeId: event.target.value })}>
+                <option value="">بدون تعيين</option>
+                {referees.map((referee) => (
+                  <option key={referee.id} value={referee.id}>
+                    {referee.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </FormGrid>
+        </div>
+      </Modal>
+
+      {/* Result modal */}
+      <Modal
+        open={!!resultTarget}
+        onClose={() => setResultTarget(null)}
+        title="إدخال / تعديل النتيجة"
+        subtitle={resultTarget ? `${formatDate(resultTarget.date)} · ${resultTarget.round || ''}` : ''}
+        icon={<Trophy className="h-5 w-5" />}
+        footer={
+          <div className="flex justify-end gap-3">
+            <Button variant="ghost" onClick={() => setResultTarget(null)} disabled={savingResult}>
+              إلغاء
+            </Button>
+            <Button loading={savingResult} onClick={() => void handleSaveResult()}>
+              حفظ النتيجة
+            </Button>
+          </div>
+        }
+      >
+        {resultTarget && (
+          <div className="space-y-7">
+            <div className="grid items-center gap-4 rounded-3xl border border-white/8 bg-white/4 p-5 sm:grid-cols-[1fr_auto_1fr]">
+              <div className="flex flex-col items-center gap-3">
+                <TeamBadge
+                  name={teamsById[resultTarget.homeTeamId]?.name || 'المضيف'}
+                  logo={teamsById[resultTarget.homeTeamId]?.logo}
+                  size="md"
+                />
+                <span className="text-center text-xs font-bold text-white">
+                  {teamsById[resultTarget.homeTeamId]?.name}
+                </span>
+                <NumberStepper
+                  value={resultForm.homeScore}
+                  onChange={(homeScore) => setResultForm({ ...resultForm, homeScore })}
+                  label="أهداف المضيف"
+                />
+              </div>
+              <span className="text-center font-heading text-xl font-black text-ink-400">—</span>
+              <div className="flex flex-col items-center gap-3">
+                <TeamBadge
+                  name={teamsById[resultTarget.awayTeamId]?.name || 'الضيف'}
+                  logo={teamsById[resultTarget.awayTeamId]?.logo}
+                  size="md"
+                />
+                <span className="text-center text-xs font-bold text-white">
+                  {teamsById[resultTarget.awayTeamId]?.name}
+                </span>
+                <NumberStepper
+                  value={resultForm.awayScore}
+                  onChange={(awayScore) => setResultForm({ ...resultForm, awayScore })}
+                  label="أهداف الضيف"
+                />
+              </div>
+            </div>
+
+            <Field label="حالة المباراة">
+              <Select
+                value={resultForm.status}
+                onChange={(event) => setResultForm({ ...resultForm, status: event.target.value as MatchLike['status'] })}
+              >
+                <option value="finished">منتهية (تُحتسب في الترتيب)</option>
+                <option value="upcoming">قادمة</option>
+                <option value="postponed">مؤجلة</option>
+                <option value="cancelled">ملغاة</option>
+              </Select>
+            </Field>
+
+            <div className="rounded-2xl border border-white/8 bg-white/4 p-4 text-[11px] leading-relaxed text-ink-300">
+              النتائج المعتمدة تُستخدم تلقائياً في الصفحة العامة لجدول الترتيب. يمكنك أيضاً الضغط على «إعادة احتساب
+              الترتيب» لتحديث إحصائيات الفرق المخزنة.
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="حذف المباراة"
+        message="سيتم حذف المباراة نهائياً من جدول البطولة."
+        confirmLabel="حذف المباراة"
+        loading={deleting}
+        onConfirm={() => void handleDelete()}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 };

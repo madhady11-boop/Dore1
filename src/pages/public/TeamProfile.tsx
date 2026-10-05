@@ -1,288 +1,411 @@
-import { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import { doc, getDoc, collection, getDocs, query, where, orderBy } from 'firebase/firestore';
-import { db } from '../../firebase';
-import { Shield, User, CalendarDays, ChevronRight, Activity, Trophy } from 'lucide-react';
-import { clsx } from 'clsx';
+import { useMemo, useState } from 'react';
+import { Link, useParams } from 'react-router-dom';
+import {
+  Activity,
+  ArrowRight,
+  CalendarDays,
+  Crown,
+  Medal,
+  ShieldAlert,
+  Shirt,
+  Trophy,
+  User,
+  Users,
+} from 'lucide-react';
+import { useTournamentData, indexTeams } from '../../hooks/useTournamentData';
+import {
+  buildStandings,
+  groupSquadByLine,
+  lastResultsForTeam,
+  matchesForTeam,
+  nextMatchForTeam,
+  sortMatchesDesc,
+} from '../../lib/stats';
+import { LINE_LABELS, LINE_COLORS, type Line } from '../../lib/constants';
+import { ageFromBirthYear, cn } from '../../lib/utils';
+import { Badge, RankChip } from '../../components/ui/Badge';
+import { Button } from '../../components/ui/Button';
+import { EmptyState, LoadingBlock } from '../../components/ui/Feedback';
+import { GlassCard } from '../../components/ui/GlassCard';
+import { SectionTitle } from '../../components/ui/SectionTitle';
+import { StatTile } from '../../components/ui/StatTile';
+import { Tabs } from '../../components/ui/Tabs';
+import { PlayerAvatar, TeamBadge } from '../../components/football/Avatars';
+import { FormationPitch } from '../../components/football/FormationPitch';
+import { FormPills } from '../../components/football/FormPills';
+import { MatchCard } from '../../components/football/MatchCard';
 
-interface Team {
-  id: string;
-  name: string;
-  coach: string;
-  captain: string;
-  establishedYear: number;
-  logo?: string;
-  played: number;
-  won: number;
-  drew: number;
-  lost: number;
-  points: number;
-}
-
-interface Player {
-  id: string;
-  name: string;
-  number: number;
-  position: string;
-  photo?: string;
-  birthYear: number;
-}
-
-interface Match {
-  id: string;
-  homeTeamId: string;
-  awayTeamId: string;
-  date: string;
-  time: string;
-  status: string;
-  homeScore?: number;
-  awayScore?: number;
-}
+type TabValue = 'formation' | 'squad' | 'matches' | 'stats';
 
 export const TeamProfile = () => {
-  const { teamId } = useParams<{ teamId: string }>();
-  const [team, setTeam] = useState<Team | null>(null);
-  const [players, setPlayers] = useState<Player[]>([]);
-  const [matches, setMatches] = useState<Match[]>([]);
-  const [allTeams, setAllTeams] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(true);
+  const { teamId = '' } = useParams<{ teamId: string }>();
+  const { teams, players, matches, loading } = useTournamentData();
+  const teamsById = useMemo(() => indexTeams(teams), [teams]);
+  const [tab, setTab] = useState<TabValue>('formation');
 
-  useEffect(() => {
-    if (teamId) {
-      fetchTeamData(teamId);
-    }
-  }, [teamId]);
+  const team = teams.find((item) => item.id === teamId);
+  const squad = useMemo(
+    () => players.filter((player) => player.teamId === teamId).sort((a, b) => (a.number ?? 99) - (b.number ?? 99)),
+    [players, teamId],
+  );
+  const lines = useMemo(() => groupSquadByLine(squad), [squad]);
+  const standings = useMemo(() => buildStandings(teams, matches), [teams, matches]);
+  const row = standings.find((item) => item.teamId === teamId);
+  const teamMatches = useMemo(() => matchesForTeam(teamId, matches), [matches, teamId]);
+  const history = useMemo(() => sortMatchesDesc(teamMatches), [teamMatches]);
+  const upcoming = useMemo(() => nextMatchForTeam(teamId, teamMatches), [teamMatches, teamId]);
+  const recent = useMemo(() => lastResultsForTeam(teamId, teamMatches, 6), [teamMatches, teamId]);
+  const scorers = useMemo(
+    () =>
+      [...squad]
+        .sort((a, b) => (b.goals ?? 0) - (a.goals ?? 0))
+        .filter((player) => (player.goals ?? 0) > 0)
+        .slice(0, 5),
+    [squad],
+  );
+  const cards = squad.reduce(
+    (acc, player) => ({
+      yellow: acc.yellow + (player.yellowCards ?? 0),
+      red: acc.red + (player.redCards ?? 0),
+    }),
+    { yellow: 0, red: 0 },
+  );
 
-  const fetchTeamData = async (id: string) => {
-    setLoading(true);
-    try {
-      // 1. Fetch Team info
-      const teamDoc = await getDoc(doc(db, 'teams', id));
-      if (teamDoc.exists()) {
-        setTeam({ id: teamDoc.id, ...teamDoc.data() } as Team);
-      }
-
-      // 2. Fetch all teams for match opponent names mapping
-      const teamsSnap = await getDocs(collection(db, 'teams'));
-      const teamMap: Record<string, string> = {};
-      teamsSnap.forEach(doc => {
-        teamMap[doc.id] = doc.data().name;
-      });
-      setAllTeams(teamMap);
-
-      // 3. Fetch Players
-      const playersQ = query(collection(db, 'players'), where('teamId', '==', id));
-      const playersSnap = await getDocs(playersQ);
-      const fetchedPlayers: Player[] = [];
-      playersSnap.forEach(doc => fetchedPlayers.push({ id: doc.id, ...doc.data() } as Player));
-      fetchedPlayers.sort((a, b) => (a.number || 0) - (b.number || 0));
-      setPlayers(fetchedPlayers);
-
-      // 4. Fetch Matches
-      // Since Firestore doesn't easily allow logical OR on multiple fields without composite indexes,
-      // we'll fetch both where homeTeamId == id and awayTeamId == id and combine them.
-      const homeQ = query(collection(db, 'matches'), where('homeTeamId', '==', id));
-      const awayQ = query(collection(db, 'matches'), where('awayTeamId', '==', id));
-      
-      const [homeSnap, awaySnap] = await Promise.all([getDocs(homeQ), getDocs(awayQ)]);
-      const fetchedMatches: Match[] = [];
-      
-      homeSnap.forEach(doc => fetchedMatches.push({ id: doc.id, ...doc.data() } as Match));
-      awaySnap.forEach(doc => {
-        // avoid duplicates if somehow same (shouldn't happen)
-        if (!fetchedMatches.some(m => m.id === doc.id)) {
-          fetchedMatches.push({ id: doc.id, ...doc.data() } as Match);
-        }
-      });
-      
-      // Sort matches by date descending
-      fetchedMatches.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-      setMatches(fetchedMatches);
-
-    } catch (error) {
-      console.error("Error fetching team details: ", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="flex justify-center p-20">
-        <div className="w-10 h-10 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
-      </div>
-    );
-  }
+  if (loading) return <LoadingBlock rows={6} label="جاري تحميل بيانات الفريق..." />;
 
   if (!team) {
     return (
-      <div className="text-center py-20 bg-zinc-900 border border-zinc-800 rounded-3xl max-w-3xl mx-auto">
-        <Shield className="w-16 h-16 text-zinc-700 mx-auto mb-4" />
-        <h3 className="text-2xl font-bold text-white mb-2">الفريق غير موجود</h3>
-        <p className="text-zinc-500">عذراً، لم نتمكن من العثور على بيانات هذا الفريق.</p>
-        <Link to="/teams" className="inline-block mt-6 px-6 py-2 bg-primary text-black font-bold rounded-xl hover:bg-primary-dark">
-          العودة للفرق
-        </Link>
-      </div>
+      <EmptyState
+        title="الفريق غير موجود"
+        description="لم نتمكن من العثور على بيانات هذا الفريق، قد يكون الرابط غير صحيح."
+        icon={<ShieldAlert className="h-6 w-6" />}
+        action={
+          <Link to="/teams">
+            <Button variant="glass" icon={<ArrowRight className="h-4 w-4" />}>
+              العودة لقائمة الفرق
+            </Button>
+          </Link>
+        }
+      />
     );
   }
 
-  const upcomingMatches = matches.filter(m => m.status === 'upcoming');
-  const pastMatches = matches.filter(m => m.status === 'finished');
-
   return (
-    <div className="space-y-12 pb-12">
-      {/* Team Header */}
-      <div className="relative rounded-3xl overflow-hidden bg-zinc-900 border border-zinc-800 p-8 md:p-12">
-        <div className="absolute top-0 right-0 w-64 h-64 bg-primary/10 rounded-full blur-3xl pointer-events-none -translate-y-1/2 translate-x-1/2" />
-        
-        <div className="relative z-10 flex flex-col md:flex-row items-center md:items-start gap-8">
-          <div className="w-32 h-32 md:w-40 md:h-40 bg-zinc-950 border-4 border-zinc-800 rounded-3xl flex items-center justify-center shrink-0 shadow-xl overflow-hidden">
-            {team.logo ? (
-              <img src={team.logo} alt={team.name} className="w-full h-full object-cover" />
-            ) : (
-              <Shield className="w-16 h-16 text-zinc-700" />
+    <div className="space-y-8 pb-6">
+      {/* ============ HEADER ============ */}
+      <section className="glass-strong noise relative overflow-hidden rounded-4xl p-6 sm:p-8 lg:p-10">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_85%_-25%,rgba(232,193,88,0.28),transparent_55%),radial-gradient(circle_at_5%_120%,rgba(56,189,248,0.16),transparent_55%)]" />
+        <div className="relative z-10 flex flex-col gap-8 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-col items-center gap-6 text-center sm:flex-row sm:text-right">
+            <TeamBadge name={team.name} logo={team.logo} size="hero" className="shadow-glass" />
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center justify-center gap-3 sm:justify-start">
+                <h1 className="font-heading text-3xl font-black text-white sm:text-4xl">{team.name}</h1>
+                {row && <RankChip rank={row.rank} className="h-8 w-8 text-sm" />}
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-2 sm:justify-start">
+                <Badge tone="neutral" icon={<User className="h-3 w-3" />}>
+                  المدرب: {team.coach || 'غير محدد'}
+                </Badge>
+                <Badge tone="neutral" icon={<Crown className="h-3 w-3" />}>
+                  الكابتن: {team.captain || 'غير محدد'}
+                </Badge>
+                <Badge tone="neutral" icon={<Trophy className="h-3 w-3" />}>
+                  تأسس {team.establishedYear || '—'}
+                </Badge>
+                <Badge tone="neutral" icon={<Users className="h-3 w-3" />}>
+                  {squad.length} لاعب
+                </Badge>
+              </div>
+              {row && (
+                <div className="flex items-center justify-center gap-3 sm:justify-start">
+                  <span className="text-[11px] font-bold text-ink-300">آخر 5 مباريات</span>
+                  <FormPills form={row.form} />
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3 sm:gap-4">
+            <MiniStat label="النقاط" value={row?.points ?? 0} accent="text-gold-200" />
+            <MiniStat label="المركز" value={row ? `${row.rank}` : '—'} accent="text-white" />
+            <MiniStat label="فارق الأهداف" value={row ? (row.goalDiff > 0 ? `+${row.goalDiff}` : row.goalDiff) : 0} accent="text-emerald-glow" />
+          </div>
+        </div>
+      </section>
+
+      {/* ============ QUICK STATS ============ */}
+      <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatTile
+          label="سجل الفريق"
+          value={`${row?.won ?? 0}-${row?.drew ?? 0}-${row?.lost ?? 0}`}
+          icon={<Activity className="h-[18px] w-[18px]" />}
+          tone="sky"
+          hint={`${row?.played ?? 0} مباراة لعبت`}
+        />
+        <StatTile
+          label="الأهداف"
+          value={row?.goalsFor ?? 0}
+          suffix={`/${row?.goalsAgainst ?? 0}`}
+          icon={<Shirt className="h-[18px] w-[18px]" />}
+          tone="emerald"
+          hint="مسجّلة / مستقبلة"
+        />
+        <StatTile
+          label="البطاقات"
+          value={cards.yellow + cards.red}
+          icon={<ShieldAlert className="h-[18px] w-[18px]" />}
+          tone="rose"
+          hint={`${cards.yellow} صفراء · ${cards.red} حمراء`}
+        />
+        <StatTile
+          label="المباراة القادمة"
+          value={upcoming ? upcoming.time || '—' : 'لا يوجد'}
+          icon={<CalendarDays className="h-[18px] w-[18px]" />}
+          tone="gold"
+          hint={
+            upcoming
+              ? `ضد ${teamsById[upcoming.homeTeamId === team.id ? upcoming.awayTeamId : upcoming.homeTeamId]?.name || '—'}`
+              : 'لم يتم جدولة مباريات قادمة'
+          }
+        />
+      </section>
+
+      {/* ============ TABS ============ */}
+      <Tabs<TabValue>
+        value={tab}
+        onChange={setTab}
+        items={[
+          { value: 'formation', label: 'التشكيلة الأساسية', icon: <Shirt className="h-4 w-4" /> },
+          { value: 'squad', label: 'قائمة اللاعبين', icon: <Users className="h-4 w-4" />, count: squad.length },
+          { value: 'matches', label: 'المباريات', icon: <CalendarDays className="h-4 w-4" />, count: teamMatches.length },
+          { value: 'stats', label: 'الإحصائيات', icon: <Medal className="h-4 w-4" /> },
+        ]}
+      />
+
+      {tab === 'formation' && (
+        <div className="grid gap-6 lg:grid-cols-[1.5fr_1fr]">
+          {squad.length ? (
+            <FormationPitch lines={lines} formation={team.formation} />
+          ) : (
+            <EmptyState
+              title="لم يتم إضافة لاعبين بعد"
+              description="ستظهر التشكيلة المرتبة هنا بمجرد أن تضيف إدارة الفريق كشف اللاعبين."
+              icon={<Users className="h-6 w-6" />}
+            />
+          )}
+
+          <div className="space-y-5">
+            <SectionTitle title="توزيع الخطوط" icon={<Activity className="h-5 w-5" />} />
+            <GlassCard padding="md" className="space-y-4">
+              {(Object.keys(lines) as Line[]).map((line) => (
+                <div key={line} className="space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold">
+                    <span className={LINE_COLORS[line].text}>{LINE_LABELS[line]}</span>
+                    <span className="text-ink-400">{lines[line].length} لاعب</span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-white/8">
+                    <div
+                      className="h-full rounded-full transition-all duration-700"
+                      style={{
+                        width: `${squad.length ? (lines[line].length / squad.length) * 100 : 0}%`,
+                        background: LINE_COLORS[line].hex,
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </GlassCard>
+
+            {scorers.length > 0 && (
+              <>
+                <SectionTitle title="هدافو الفريق" icon={<Medal className="h-5 w-5" />} />
+                <GlassCard padding="none" className="divide-y divide-white/6">
+                  {scorers.map((player) => (
+                    <Link
+                      key={player.id}
+                      to={`/players/${player.id}`}
+                      className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-white/5"
+                    >
+                      <PlayerAvatar name={player.name} photo={player.photo} number={player.number} size="sm" />
+                      <span className="flex-1 truncate text-sm font-bold text-white">{player.name}</span>
+                      <Badge tone="gold" size="sm">
+                        {player.goals} هدف
+                      </Badge>
+                    </Link>
+                  ))}
+                </GlassCard>
+              </>
             )}
           </div>
-          
-          <div className="flex-1 text-center md:text-right">
-            <h1 className="text-4xl md:text-5xl font-heading font-extrabold text-white mb-4">{team.name}</h1>
-            
-            <div className="flex flex-wrap items-center justify-center md:justify-start gap-4 text-sm font-medium">
-              <div className="bg-zinc-800/50 border border-zinc-700/50 px-4 py-2 rounded-xl flex flex-col">
-                <span className="text-zinc-500 text-xs mb-0.5">المدرب</span>
-                <span className="text-white">{team.coach || 'غير محدد'}</span>
-              </div>
-              <div className="bg-zinc-800/50 border border-zinc-700/50 px-4 py-2 rounded-xl flex flex-col">
-                <span className="text-zinc-500 text-xs mb-0.5">الكابتن</span>
-                <span className="text-white">{team.captain || 'غير محدد'}</span>
-              </div>
-              <div className="bg-zinc-800/50 border border-zinc-700/50 px-4 py-2 rounded-xl flex flex-col">
-                <span className="text-zinc-500 text-xs mb-0.5">سنة التأسيس</span>
-                <span className="text-white">{team.establishedYear || '-'}</span>
-              </div>
-            </div>
-          </div>
-          
-          <div className="bg-zinc-950 p-6 rounded-3xl border border-zinc-800 text-center min-w-[140px]">
-            <Trophy className="w-8 h-8 text-primary mx-auto mb-2" />
-            <div className="text-3xl font-heading font-black text-white mb-1">{team.points || 0}</div>
-            <div className="text-xs text-zinc-500 font-bold uppercase tracking-wider">نقطة</div>
-          </div>
         </div>
+      )}
+
+      {tab === 'squad' && (
+        <div className="space-y-6">
+          {(Object.keys(lines) as Line[]).map((line) =>
+            lines[line].length ? (
+              <section key={line} className="space-y-3">
+                <SectionTitle
+                  title={LINE_LABELS[line]}
+                  icon={<span className={cn('h-3 w-3 rounded-full', LINE_COLORS[line].bg)} />}
+                  subtitle={`${lines[line].length} لاعب`}
+                />
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {lines[line].map((player) => (
+                    <Link key={player.id} to={`/players/${player.id}`}>
+                      <GlassCard hover padding="sm" className="flex items-center gap-3">
+                        <PlayerAvatar name={player.name} photo={player.photo} number={player.number} size="sm" />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-bold text-white">{player.name}</p>
+                          <p className="truncate text-[11px] text-ink-300">
+                            {player.position || LINE_LABELS[line]} · {ageFromBirthYear(player.birthYear)}
+                          </p>
+                        </div>
+                        <div className="text-center">
+                          <p className="font-heading text-lg font-black text-gold-200">{player.goals ?? 0}</p>
+                          <p className="text-[10px] text-ink-400">هدف</p>
+                        </div>
+                      </GlassCard>
+                    </Link>
+                  ))}
+                </div>
+              </section>
+            ) : null,
+          )}
+          {squad.length === 0 && <EmptyState title="لا يوجد لاعبون مسجلون" icon={<Users className="h-6 w-6" />} />}
+        </div>
+      )}
+
+      {tab === 'matches' && (
+        <div className="grid gap-6 lg:grid-cols-2">
+          <section className="space-y-4">
+            <SectionTitle title="المباريات القادمة" icon={<CalendarDays className="h-5 w-5" />} />
+            {history.filter((m) => m.status === 'upcoming').length ? (
+              <div className="grid gap-4">
+                {history
+                  .filter((m) => m.status === 'upcoming')
+                  .map((match) => (
+                    <MatchCard
+                      key={match.id}
+                      match={match}
+                      homeTeam={teamsById[match.homeTeamId]}
+                      awayTeam={teamsById[match.awayTeamId]}
+                      highlightTeamId={team.id}
+                      variant="compact"
+                    />
+                  ))}
+              </div>
+            ) : (
+              <EmptyState title="لا توجد مباريات قادمة" icon={<CalendarDays className="h-6 w-6" />} />
+            )}
+          </section>
+
+          <section className="space-y-4">
+            <SectionTitle title="آخر النتائج" icon={<Activity className="h-5 w-5" />} />
+            {recent.length ? (
+              <div className="grid gap-4">
+                {recent.map((match) => (
+                  <MatchCard
+                    key={match.id}
+                    match={match}
+                    homeTeam={teamsById[match.homeTeamId]}
+                    awayTeam={teamsById[match.awayTeamId]}
+                    highlightTeamId={team.id}
+                    variant="compact"
+                  />
+                ))}
+              </div>
+            ) : (
+              <EmptyState title="لم تُلعب أي مباراة بعد" icon={<Activity className="h-6 w-6" />} />
+            )}
+          </section>
+        </div>
+      )}
+
+      {tab === 'stats' && (
+        <div className="grid gap-6 lg:grid-cols-2">
+          <GlassCard padding="lg" className="space-y-5">
+            <SectionTitle title="الأداء الهجومي" icon={<Shirt className="h-5 w-5" />} />
+            <div className="space-y-4">
+              <MetricBar label="نسبة الفوز" value={row?.won ?? 0} total={row?.played ?? 0} color="bg-emerald-glow" />
+              <MetricBar label="نسبة التعادل" value={row?.drew ?? 0} total={row?.played ?? 0} color="bg-white/45" />
+              <MetricBar label="نسبة الخسارة" value={row?.lost ?? 0} total={row?.played ?? 0} color="bg-rose-glow" />
+              <MetricBar
+                label="معدل التسجيل"
+                value={Number(((row?.goalsFor ?? 0) / Math.max(1, row?.played ?? 1)).toFixed(2))}
+                total={5}
+                color="bg-gold-400"
+                suffix="هدف/مباراة"
+              />
+            </div>
+          </GlassCard>
+
+          <GlassCard padding="lg" className="space-y-5">
+            <SectionTitle title="أبرز اللاعبين" icon={<Medal className="h-5 w-5" />} />
+            {squad.length ? (
+              <div className="space-y-3">
+                {[...squad]
+                  .sort((a, b) => (b.motm ?? 0) - (a.motm ?? 0) || (b.matchesPlayed ?? 0) - (a.matchesPlayed ?? 0))
+                  .slice(0, 5)
+                  .map((player, index) => (
+                    <div key={player.id} className="flex items-center gap-3">
+                      <span className="w-5 text-center font-heading text-sm font-black text-ink-400">{index + 1}</span>
+                      <PlayerAvatar name={player.name} photo={player.photo} number={player.number} size="sm" />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-bold text-white">{player.name}</p>
+                        <p className="text-[11px] text-ink-300">
+                          {player.matchesPlayed ?? 0} مباراة · {player.motm ?? 0} نجم مباراة
+                        </p>
+                      </div>
+                      <Badge tone="neutral" size="sm">
+                        {player.goals ?? 0} هدف
+                      </Badge>
+                    </div>
+                  ))}
+              </div>
+            ) : (
+              <p className="text-sm text-ink-300">لا توجد إحصائيات فردية بعد.</p>
+            )}
+          </GlassCard>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const MiniStat = ({ label, value, accent }: { label: string; value: string | number; accent: string }) => (
+  <div className="glass-soft min-w-[6rem] rounded-2xl px-4 py-3 text-center">
+    <p className={cn('font-heading text-2xl font-black tabular-nums', accent)}>{value}</p>
+    <p className="text-[10px] font-bold text-ink-400">{label}</p>
+  </div>
+);
+
+const MetricBar = ({
+  label,
+  value,
+  total,
+  color,
+  suffix,
+}: {
+  label: string;
+  value: number;
+  total: number;
+  color: string;
+  suffix?: string;
+}) => {
+  const percentage = total ? Math.min(100, Math.round((value / total) * 100)) : 0;
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between text-xs font-bold text-ink-200">
+        <span>{label}</span>
+        <span className="tabular-nums">
+          {value}
+          {suffix ? ` ${suffix}` : ''}
+        </span>
       </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Left Column: Matches */}
-        <div className="lg:col-span-1 space-y-8">
-          {/* Upcoming Matches */}
-          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
-            <h2 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
-              <CalendarDays className="w-5 h-5 text-primary" />
-              المباريات القادمة
-            </h2>
-            
-            <div className="space-y-4">
-              {upcomingMatches.length > 0 ? upcomingMatches.map(match => (
-                <div key={match.id} className="bg-zinc-950 border border-zinc-800 p-4 rounded-2xl flex flex-col gap-3">
-                  <div className="text-xs text-zinc-500 font-bold text-center">
-                    {match.date} • {match.time}
-                  </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className={clsx("font-bold text-sm truncate flex-1 text-center", match.homeTeamId === team.id ? "text-primary" : "text-white")}>
-                      {allTeams[match.homeTeamId]}
-                    </span>
-                    <span className="text-zinc-600 font-black text-sm">VS</span>
-                    <span className={clsx("font-bold text-sm truncate flex-1 text-center", match.awayTeamId === team.id ? "text-primary" : "text-white")}>
-                      {allTeams[match.awayTeamId]}
-                    </span>
-                  </div>
-                </div>
-              )) : (
-                <div className="text-center text-zinc-500 text-sm py-4">لا توجد مباريات قادمة قريباً.</div>
-              )}
-            </div>
-          </section>
-
-          {/* Past Results */}
-          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
-            <h2 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
-              <Activity className="w-5 h-5 text-accent-green" />
-              أحدث النتائج
-            </h2>
-            
-            <div className="space-y-4">
-              {pastMatches.slice(0, 5).length > 0 ? pastMatches.slice(0, 5).map(match => {
-                const isHome = match.homeTeamId === team.id;
-                const teamScore = isHome ? match.homeScore : match.awayScore;
-                const opponentScore = isHome ? match.awayScore : match.homeScore;
-                const result = teamScore! > opponentScore! ? 'W' : teamScore! < opponentScore! ? 'L' : 'D';
-                const resultColor = result === 'W' ? 'bg-accent-green text-black' : result === 'L' ? 'bg-accent-red text-white' : 'bg-zinc-500 text-white';
-
-                return (
-                  <div key={match.id} className="bg-zinc-950 border border-zinc-800 p-4 rounded-2xl flex items-center justify-between gap-3">
-                    <div className={clsx("w-6 h-6 rounded-md flex items-center justify-center font-bold text-xs", resultColor)}>
-                      {result}
-                    </div>
-                    <div className="flex-1 flex items-center justify-center gap-3 font-bold text-sm">
-                      <span className={clsx("truncate text-left w-20", isHome ? "text-primary" : "text-white")}>
-                        {allTeams[match.homeTeamId]}
-                      </span>
-                      <span className="bg-zinc-900 px-2 py-1 rounded text-white min-w-[3rem] text-center">
-                        {match.homeScore} - {match.awayScore}
-                      </span>
-                      <span className={clsx("truncate text-right w-20", !isHome ? "text-primary" : "text-white")}>
-                        {allTeams[match.awayTeamId]}
-                      </span>
-                    </div>
-                  </div>
-                );
-              }) : (
-                <div className="text-center text-zinc-500 text-sm py-4">لم يلعب الفريق أي مباراة بعد.</div>
-              )}
-            </div>
-          </section>
-        </div>
-
-        {/* Right Column: Players */}
-        <div className="lg:col-span-2">
-          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 md:p-8">
-            <h2 className="text-2xl font-bold text-white mb-8 flex items-center gap-3">
-              <Users className="w-6 h-6 text-primary" />
-              تشكيلة الفريق
-            </h2>
-            
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
-              {players.map(player => (
-                <Link key={player.id} to={`/players/${player.id}`} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-5 hover:border-primary/50 transition-colors group relative overflow-hidden">
-                  <div className="w-16 h-16 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mx-auto mb-4 overflow-hidden relative">
-                    {player.photo ? (
-                      <img src={player.photo} alt={player.name} className="w-full h-full object-cover" />
-                    ) : (
-                      <User className="w-6 h-6 text-zinc-600" />
-                    )}
-                    <div className="absolute bottom-0 right-0 bg-primary text-black text-xs font-black px-1.5 py-0.5 rounded-tl-lg">
-                      {player.number}
-                    </div>
-                  </div>
-                  
-                  <div className="text-center">
-                    <h3 className="text-base font-bold text-white mb-1 group-hover:text-primary transition-colors line-clamp-1">{player.name}</h3>
-                    <span className="text-xs font-medium text-zinc-500 bg-zinc-900 px-2.5 py-1 rounded-md inline-block">
-                      {player.position}
-                    </span>
-                  </div>
-                </Link>
-              ))}
-
-              {players.length === 0 && (
-                <div className="col-span-full py-12 text-center text-zinc-500">
-                  لم يتم إضافة لاعبي هذا الفريق بعد.
-                </div>
-              )}
-            </div>
-          </section>
-        </div>
+      <div className="h-2 w-full overflow-hidden rounded-full bg-white/8">
+        <div className={cn('h-full rounded-full transition-all duration-700', color)} style={{ width: `${percentage}%` }} />
       </div>
     </div>
   );

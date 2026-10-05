@@ -1,101 +1,103 @@
-import { useState, useEffect } from 'react';
-import { collection, getDocs, query, orderBy } from 'firebase/firestore';
-import { db } from '../../firebase';
-import { Megaphone, CalendarDays } from 'lucide-react';
-
-interface Announcement {
-  id: string;
-  title: string;
-  date: string;
-  content: string;
-  issuer: string;
-  createdAt: number;
-}
+import { useMemo, useState } from 'react';
+import { Bell, CalendarDays, FileText, Megaphone, Search, UserCheck } from 'lucide-react';
+import { useTournamentData } from '../../hooks/useTournamentData';
+import { formatDate, timeAgo } from '../../lib/utils';
+import { Badge } from '../../components/ui/Badge';
+import { EmptyState, LoadingBlock } from '../../components/ui/Feedback';
+import { GlassCard } from '../../components/ui/GlassCard';
+import { SearchInput } from '../../components/ui/Form';
 
 export const Announcements = () => {
-  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { announcements, loading } = useTournamentData();
+  const [search, setSearch] = useState('');
 
-  useEffect(() => {
-    fetchAnnouncements();
-  }, []);
-
-  const fetchAnnouncements = async () => {
-    try {
-      const q = query(collection(db, 'announcements'), orderBy('createdAt', 'desc'));
-      const querySnapshot = await getDocs(q);
-      const fetched: Announcement[] = [];
-      querySnapshot.forEach((doc) => {
-        fetched.push({ id: doc.id, ...doc.data() } as Announcement);
+  const list = useMemo(() => {
+    const term = search.trim();
+    return [...announcements]
+      .filter((item) => (term ? item.title?.includes(term) || item.content?.includes(term) || item.issuer?.includes(term) : true))
+      .sort((a, b) => {
+        const dateA = String(a.date || '') + String(a.id);
+        const dateB = String(b.date || '') + String(b.id);
+        return dateB.localeCompare(dateA);
       });
-      setAnnouncements(fetched);
-    } catch (error) {
-      console.error("Error fetching announcements: ", error);
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [announcements, search]);
 
   return (
-    <div className="space-y-12">
-      {/* Header Section */}
-      <section className="relative rounded-3xl overflow-hidden bg-zinc-900 border border-zinc-800 p-8 md:p-12">
-        <div className="absolute top-0 right-0 w-64 h-64 bg-primary/10 rounded-full blur-3xl pointer-events-none -translate-y-1/2 translate-x-1/2" />
-        <div className="relative z-10 flex flex-col items-center text-center">
-          <div className="w-16 h-16 bg-primary/20 rounded-2xl border border-primary/50 flex items-center justify-center mb-6">
-            <Megaphone className="w-8 h-8 text-primary" />
-          </div>
-          <h1 className="text-3xl md:text-5xl font-heading font-extrabold text-white mb-4 tracking-tight">
-            التبليغات <span className="text-primary">الرسمية</span>
+    <div className="space-y-8 pb-6">
+      <section className="glass-strong noise relative overflow-hidden rounded-4xl p-6 text-center sm:p-12">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_-30%,rgba(232,193,88,0.28),transparent_60%)]" />
+        <div className="relative z-10 mx-auto max-w-3xl space-y-5">
+          <span className="mx-auto flex h-16 w-16 items-center justify-center rounded-3xl border border-gold-300/30 bg-gold-400/12">
+            <Megaphone className="h-8 w-8 text-gold-200" />
+          </span>
+          <h1 className="font-heading text-3xl font-black text-white sm:text-5xl">
+            التبليغات <span className="text-gradient-gold">الرسمية</span>
           </h1>
-          <p className="text-lg text-zinc-400 max-w-2xl leading-relaxed">
-            تابع آخر القرارات والتبليغات الرسمية الصادرة من اللجنة المنظمة ولجنة الانضباط في دوري صوب الشامية.
+          <p className="text-sm leading-relaxed text-ink-200 sm:text-base">
+            كل القرارات والتبليغات الصادرة عن اللجنة المنظمة ولجنة الانضباط واللجان الفرعية في دوري صوب الشامية — منشورة
+            رسمياً وبترتيب زمني.
           </p>
+          <SearchInput
+            placeholder="ابحث في التبليغات..."
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            className="mx-auto w-full max-w-lg"
+          />
         </div>
       </section>
 
-      {/* Announcements List */}
       {loading ? (
-        <div className="flex justify-center p-12">
-          <div className="w-10 h-10 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
-        </div>
+        <LoadingBlock rows={5} label="جاري تحميل التبليغات..." />
+      ) : list.length === 0 ? (
+        <EmptyState
+          title="لا توجد تبليغات"
+          description={search ? 'لم يتم العثور على تبليغ مطابق لبحثك.' : 'لم يتم نشر أي تبليغات رسمية حتى الآن.'}
+          icon={<Megaphone className="h-6 w-6" />}
+        />
       ) : (
-        <div className="max-w-4xl mx-auto space-y-6">
-          {announcements.map((announcement) => (
-            <div key={announcement.id} className="group bg-zinc-900 border border-zinc-800 rounded-3xl p-6 md:p-8 hover:border-primary/50 transition-colors relative overflow-hidden">
-              <div className="absolute top-0 right-0 w-1 h-full bg-primary/50 group-hover:bg-primary transition-colors" />
-              
-              <div className="flex flex-col md:flex-row md:items-start justify-between gap-4 mb-6">
-                <div>
-                  <h2 className="text-2xl font-bold text-white mb-3 group-hover:text-primary transition-colors">{announcement.title}</h2>
-                  <div className="flex items-center gap-4 text-sm font-medium">
-                    <span className="flex items-center gap-1.5 text-zinc-400 bg-zinc-950 px-3 py-1.5 rounded-full border border-zinc-800">
-                      <CalendarDays className="w-4 h-4 text-primary" /> 
-                      {announcement.date}
-                    </span>
-                    <span className="text-zinc-500 flex items-center gap-2">
-                      <span className="w-1 h-1 rounded-full bg-zinc-700" />
-                      {announcement.issuer}
-                    </span>
+        <div className="mx-auto max-w-4xl space-y-5">
+          {list.map((item) => (
+            <GlassCard key={item.id} hover padding="lg" className="relative">
+              <span className="absolute inset-y-6 right-0 w-1 rounded-full bg-[linear-gradient(180deg,#f4e0a1,#d4af37)]" />
+              <div className="space-y-4 ps-2">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div className="space-y-2">
+                    <h2 className="font-heading text-xl font-bold text-white sm:text-2xl">{item.title}</h2>
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] font-bold">
+                      <Badge tone="gold" size="sm" icon={<UserCheck className="h-3 w-3" />}>
+                        {item.issuer || 'اللجنة المنظمة'}
+                      </Badge>
+                      <Badge tone="neutral" size="sm" icon={<CalendarDays className="h-3 w-3" />}>
+                        {formatDate(item.date) !== '—' ? formatDate(item.date) : timeAgo(item.createdAt)}
+                      </Badge>
+                      {item.status === 'draft' && (
+                        <Badge tone="amber" size="sm" icon={<FileText className="h-3 w-3" />}>
+                          مسودة
+                        </Badge>
+                      )}
+                    </div>
                   </div>
+                  <Bell className="h-5 w-5 shrink-0 text-gold-300/70" />
                 </div>
+
+                {item.image && (
+                  <img
+                    src={item.image}
+                    alt={item.title}
+                    className="w-full rounded-2xl border border-white/10 object-cover"
+                    loading="lazy"
+                  />
+                )}
+
+                <p className="whitespace-pre-line text-sm leading-loose text-ink-100">{item.content}</p>
               </div>
-              
-              <div className="prose prose-invert max-w-none">
-                <p className="text-zinc-300 leading-loose whitespace-pre-wrap text-lg">
-                  {announcement.content}
-                </p>
-              </div>
-            </div>
+            </GlassCard>
           ))}
 
-          {announcements.length === 0 && (
-            <div className="text-center py-20 bg-zinc-900 border border-zinc-800 rounded-3xl">
-              <Megaphone className="w-16 h-16 text-zinc-800 mx-auto mb-4" />
-              <h3 className="text-2xl font-bold text-white mb-2">لا توجد تبليغات حالياً</h3>
-              <p className="text-zinc-500 text-lg">لم يتم نشر أي تبليغات رسمية حتى الآن.</p>
-            </div>
-          )}
+          <div className="glass-soft flex flex-wrap items-center justify-center gap-3 rounded-3xl px-5 py-4 text-xs text-ink-300">
+            <Search className="h-4 w-4 text-gold-300" />
+            عدد التبليغات المنشورة: {list.length}
+          </div>
         </div>
       )}
     </div>

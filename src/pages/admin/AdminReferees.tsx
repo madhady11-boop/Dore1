@@ -1,202 +1,249 @@
-import { useState, useEffect } from 'react';
-import { collection, getDocs, addDoc, deleteDoc, doc, serverTimestamp, query, orderBy } from 'firebase/firestore';
+import { useState } from 'react';
+import { addDoc, collection, deleteDoc, doc, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { Edit3, Phone, Plus, ShieldCheck, Trash2, UserSquare2 } from 'lucide-react';
 import { db } from '../../firebase';
-import { Plus, Trash2, Shield, UserSquare2 } from 'lucide-react';
+import { useTournamentData, type Referee } from '../../hooks/useTournamentData';
+import { firebaseErrorMessage } from '../../lib/utils';
+import { Badge } from '../../components/ui/Badge';
+import { Button } from '../../components/ui/Button';
+import { EmptyState, LoadingBlock } from '../../components/ui/Feedback';
+import { Field, FormGrid, Input, Select } from '../../components/ui/Form';
+import { GlassCard } from '../../components/ui/GlassCard';
+import { ConfirmDialog, Modal } from '../../components/ui/Modal';
+import { useToast } from '../../components/ui/Toast';
+import { ImageUploader } from '../../components/media/ImageUploader';
 
-interface Referee {
-  id: string;
+interface RefereeForm {
   name: string;
   phone: string;
   level: string;
   matchesCount: number;
+  image: string;
 }
 
+const emptyForm = (): RefereeForm => ({ name: '', phone: '', level: 'درجة أولى', matchesCount: 0, image: '' });
+
 export const AdminReferees = () => {
-  const [referees, setReferees] = useState<Referee[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showAddForm, setShowAddForm] = useState(false);
-  const [newReferee, setNewReferee] = useState({
-    name: '',
-    phone: '',
-    level: 'درجة أولى',
-  });
+  const { referees, loading, refresh } = useTournamentData();
+  const toast = useToast();
 
-  useEffect(() => {
-    fetchReferees();
-  }, []);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing, setEditing] = useState<Referee | null>(null);
+  const [form, setForm] = useState<RefereeForm>(emptyForm());
+  const [saving, setSaving] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Referee | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
-  const fetchReferees = async () => {
-    setLoading(true);
+  const openCreate = () => {
+    setEditing(null);
+    setForm(emptyForm());
+    setModalOpen(true);
+  };
+
+  const openEdit = (referee: Referee) => {
+    setEditing(referee);
+    setForm({
+      name: referee.name || '',
+      phone: referee.phone || '',
+      level: referee.level || 'درجة أولى',
+      matchesCount: referee.matchesCount ?? 0,
+      image: referee.image || '',
+    });
+    setModalOpen(true);
+  };
+
+  const handleSubmit = async () => {
+    if (!form.name.trim()) {
+      toast.error('اسم الحكم مطلوب.');
+      return;
+    }
+    setSaving(true);
     try {
-      const q = query(collection(db, 'referees'), orderBy('createdAt', 'desc'));
-      const snapshot = await getDocs(q);
-      const fetched: Referee[] = [];
-      snapshot.forEach((doc) => {
-        fetched.push({ id: doc.id, ...doc.data() } as Referee);
-      });
-      setReferees(fetched);
+      if (editing) {
+        await updateDoc(doc(db, 'referees', editing.id), {
+          name: form.name.trim(),
+          phone: form.phone.trim(),
+          level: form.level,
+          matchesCount: Number(form.matchesCount) || 0,
+          image: form.image,
+        });
+        toast.success('تم تحديث بيانات الحكم.');
+      } else {
+        await addDoc(collection(db, 'referees'), {
+          name: form.name.trim(),
+          phone: form.phone.trim(),
+          level: form.level,
+          matchesCount: Number(form.matchesCount) || 0,
+          image: form.image,
+          createdAt: serverTimestamp(),
+        });
+        toast.success('تمت إضافة الحكم.');
+      }
+      setModalOpen(false);
+      refresh();
     } catch (error) {
-      console.error("Error fetching referees: ", error);
+      toast.error(firebaseErrorMessage(error));
     } finally {
-      setLoading(false);
+      setSaving(false);
     }
   };
 
-  const handleAddReferee = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
-      await addDoc(collection(db, 'referees'), {
-        ...newReferee,
-        matchesCount: 0,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      setShowAddForm(false);
-      setNewReferee({ name: '', phone: '', level: 'درجة أولى' });
-      fetchReferees();
+      await deleteDoc(doc(db, 'referees', deleteTarget.id));
+      toast.success('تم حذف الحكم.');
+      setDeleteTarget(null);
+      refresh();
     } catch (error) {
-      console.error("Error adding referee: ", error);
-    }
-  };
-
-  const handleDelete = async (id: string) => {
-    if (!window.confirm('هل أنت متأكد من حذف هذا الحكم؟')) return;
-    try {
-      await deleteDoc(doc(db, 'referees', id));
-      fetchReferees();
-    } catch (error) {
-      console.error("Error deleting referee: ", error);
+      toast.error(firebaseErrorMessage(error));
+    } finally {
+      setDeleting(false);
     }
   };
 
   return (
-    <div className="space-y-8 max-w-7xl mx-auto">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-heading font-bold text-white mb-2">إدارة الحكام</h1>
-          <p className="text-zinc-400">إضافة وتعديل بيانات حكام البطولة ومتابعة سجلاتهم.</p>
+    <div className="space-y-7">
+      <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
+        <div className="space-y-1">
+          <h1 className="font-heading text-2xl font-black text-white">طاقم التحكيم</h1>
+          <p className="text-sm text-ink-300">
+            سجل الحكام المعتمدين للبطولة مع صورهم وبيانات التواصل ليتم تعيينهم على المباريات.
+          </p>
         </div>
-        <button 
-          onClick={() => setShowAddForm(!showAddForm)}
-          className="bg-primary text-black px-5 py-2.5 rounded-xl font-bold text-sm hover:bg-primary-dark transition-colors shadow-lg shadow-primary/20 flex items-center gap-2"
-        >
-          <Plus className="w-5 h-5" />
-          إضافة حكم جديد
-        </button>
+        <Button icon={<Plus className="h-4 w-4" />} onClick={openCreate}>
+          إضافة حكم
+        </Button>
       </div>
 
-      {showAddForm && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 md:p-8 border-t-4 border-t-primary">
-          <h2 className="text-xl font-bold text-white mb-6">تفاصيل الحكم الجديد</h2>
-          <form onSubmit={handleAddReferee} className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-zinc-400">اسم الحكم الرباعي</label>
-              <input 
-                required
-                type="text" 
-                value={newReferee.name}
-                onChange={(e) => setNewReferee({...newReferee, name: e.target.value})}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary transition-colors"
-                placeholder="الاسم الكامل"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-zinc-400">رقم الهاتف</label>
-              <input 
-                type="tel" 
-                value={newReferee.phone}
-                onChange={(e) => setNewReferee({...newReferee, phone: e.target.value})}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary transition-colors"
-                placeholder="07..."
+      {loading ? (
+        <LoadingBlock rows={4} label="جاري تحميل الحكام..." />
+      ) : referees.length === 0 ? (
+        <EmptyState
+          title="لا يوجد حكام مسجلون"
+          description="أضف أول حكم لبدء تعيين الطواقم على المباريات."
+          icon={<UserSquare2 className="h-6 w-6" />}
+          action={
+            <Button variant="glass" icon={<Plus className="h-4 w-4" />} onClick={openCreate}>
+              إضافة حكم
+            </Button>
+          }
+        />
+      ) : (
+        <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+          {referees.map((referee) => (
+            <GlassCard key={referee.id} hover padding="md" className="space-y-4">
+              <div className="flex items-start gap-4">
+                {referee.image ? (
+                  <img
+                    src={referee.image}
+                    alt={referee.name}
+                    className="h-16 w-16 shrink-0 rounded-2xl border border-white/10 object-cover"
+                    loading="lazy"
+                  />
+                ) : (
+                  <span className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-white/5">
+                    <ShieldCheck className="h-7 w-7 text-gold-300" />
+                  </span>
+                )}
+                <div className="min-w-0 flex-1 space-y-2">
+                  <h3 className="truncate font-bold text-white">{referee.name}</h3>
+                  <Badge tone="gold" size="sm">
+                    {referee.level || 'حكم'}
+                  </Badge>
+                  {referee.phone && (
+                    <p className="inline-flex items-center gap-1.5 text-[11px] text-ink-300" dir="ltr">
+                      <Phone className="h-3 w-3" />
+                      {referee.phone}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between border-t border-white/8 pt-3">
+                <span className="text-[11px] text-ink-300">
+                  أدار <strong className="text-white">{referee.matchesCount ?? 0}</strong> مباراة
+                </span>
+                <div className="flex gap-1.5">
+                  <Button size="icon-sm" variant="glass" onClick={() => openEdit(referee)} aria-label="تعديل">
+                    <Edit3 className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button size="icon-sm" variant="danger" onClick={() => setDeleteTarget(referee)} aria-label="حذف">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
+            </GlassCard>
+          ))}
+        </div>
+      )}
+
+      <Modal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        title={editing ? `تعديل ${editing.name}` : 'إضافة حكم جديد'}
+        icon={<UserSquare2 className="h-5 w-5" />}
+        footer={
+          <div className="flex justify-end gap-3">
+            <Button variant="ghost" onClick={() => setModalOpen(false)} disabled={saving}>
+              إلغاء
+            </Button>
+            <Button loading={saving} onClick={() => void handleSubmit()}>
+              {editing ? 'حفظ التعديلات' : 'إضافة الحكم'}
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-6">
+          <ImageUploader
+            folder="referees"
+            shape="circle"
+            label="صورة الحكم (اختياري)"
+            value={form.image}
+            onChange={(image) => setForm((current) => ({ ...current, image }))}
+          />
+          <FormGrid>
+            <Field label="الاسم" required>
+              <Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
+            </Field>
+            <Field label="رقم الهاتف">
+              <Input
                 dir="ltr"
+                value={form.phone}
+                onChange={(event) => setForm({ ...form, phone: event.target.value })}
+                placeholder="07xxxxxxxxx"
               />
-            </div>
-            <div className="space-y-2 md:col-span-2">
-              <label className="text-sm font-medium text-zinc-400">درجة التحكيم</label>
-              <select 
-                value={newReferee.level}
-                onChange={(e) => setNewReferee({...newReferee, level: e.target.value})}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary transition-colors"
-              >
+            </Field>
+            <Field label="الدرجة">
+              <Select value={form.level} onChange={(event) => setForm({ ...form, level: event.target.value })}>
+                <option value="دولي">دولي</option>
                 <option value="درجة أولى">درجة أولى</option>
                 <option value="درجة ثانية">درجة ثانية</option>
-                <option value="درجة ثالثة">درجة ثالثة</option>
-                <option value="دولي">دولي</option>
-                <option value="ساحات مكشوفة">ساحات مكشوفة</option>
-              </select>
-            </div>
-            
-            <div className="md:col-span-2 flex justify-end gap-3 mt-4">
-              <button 
-                type="button" 
-                onClick={() => setShowAddForm(false)}
-                className="px-6 py-3 rounded-xl border border-zinc-800 text-zinc-300 hover:bg-zinc-800 transition-colors font-medium"
-              >
-                إلغاء
-              </button>
-              <button 
-                type="submit"
-                className="px-6 py-3 rounded-xl bg-primary text-black hover:bg-primary-dark transition-colors font-bold"
-              >
-                حفظ الحكم
-              </button>
-            </div>
-          </form>
+                <option value="حكم معتمد">حكم معتمد</option>
+              </Select>
+            </Field>
+            <Field label="عدد المباريات المُدارة">
+              <Input
+                type="number"
+                min={0}
+                value={form.matchesCount}
+                onChange={(event) => setForm({ ...form, matchesCount: Number(event.target.value) })}
+              />
+            </Field>
+          </FormGrid>
         </div>
-      )}
+      </Modal>
 
-      {loading ? (
-        <div className="flex justify-center p-12">
-          <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {referees.map((referee) => (
-            <div key={referee.id} className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 hover:border-zinc-700 transition-colors group">
-              <div className="flex justify-between items-start mb-4">
-                <div className="w-14 h-14 bg-zinc-950 border border-zinc-800 rounded-2xl flex items-center justify-center text-primary group-hover:scale-110 transition-transform">
-                  <UserSquare2 className="w-7 h-7" />
-                </div>
-                <button 
-                  onClick={() => handleDelete(referee.id)}
-                  className="p-2 text-zinc-500 hover:text-accent-red hover:bg-accent-red/10 rounded-lg transition-colors"
-                  title="حذف الحكم"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-              
-              <h3 className="text-xl font-bold text-white mb-1">{referee.name}</h3>
-              <div className="flex items-center gap-2 mb-6">
-                <span className="text-xs bg-primary/10 text-primary px-2.5 py-1 rounded-md font-bold">
-                  {referee.level}
-                </span>
-                <span className="text-xs text-zinc-500 font-medium" dir="ltr">
-                  {referee.phone}
-                </span>
-              </div>
-              
-              <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-xl border border-zinc-800/50">
-                <div className="flex items-center gap-2 text-zinc-400 text-sm">
-                  <Shield className="w-4 h-4 text-zinc-500" />
-                  المباريات المُدارة
-                </div>
-                <div className="font-heading font-black text-xl text-white">
-                  {referee.matchesCount || 0}
-                </div>
-              </div>
-            </div>
-          ))}
-
-          {referees.length === 0 && (
-             <div className="col-span-full py-16 text-center bg-zinc-900 border border-zinc-800 rounded-3xl">
-               <UserSquare2 className="w-12 h-12 text-zinc-700 mx-auto mb-4" />
-               <h3 className="text-lg font-bold text-white mb-2">لا يوجد حكام</h3>
-               <p className="text-zinc-500">قم بإضافة الحكم الأول للبطولة عبر الزر أعلاه.</p>
-             </div>
-          )}
-        </div>
-      )}
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="حذف الحكم"
+        message={`سيتم حذف "${deleteTarget?.name}" من قائمة الحكام.`}
+        confirmLabel="حذف"
+        loading={deleting}
+        onConfirm={() => void handleDelete()}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 };

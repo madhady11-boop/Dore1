@@ -1,12 +1,27 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { User as FirebaseUser, onAuthStateChanged, signOut, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import {
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+  type User as FirebaseUser,
+} from 'firebase/auth';
+import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
+import { ADMIN_ROLES } from '../lib/constants';
+
+export type UserRole =
+  | 'super_admin'
+  | 'tournament_manager'
+  | 'disciplinary_committee'
+  | 'media_manager'
+  | 'stats_manager'
+  | 'team';
 
 export interface UserProfile {
   uid: string;
   email: string;
-  role: 'super_admin' | 'tournament_manager' | 'disciplinary_committee' | 'media_manager' | 'stats_manager' | 'team';
+  role: UserRole;
   teamId?: string;
   displayName?: string;
   photoURL?: string;
@@ -19,9 +34,14 @@ interface AuthContextType {
   signInWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
   isAdmin: boolean;
+  /** true for accounts with any control-panel role */
+  isStaff: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
+
+/** The founding account always keeps full control of the platform. */
+const SUPER_ADMIN_EMAIL = 'bkwrya552@gmail.com';
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<FirebaseUser | null>(null);
@@ -31,86 +51,63 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
-      if (currentUser) {
-        // Special case for creator super admin
-        let currentProfile: UserProfile | null = null;
-        if (currentUser.email === 'bkwrya552@gmail.com') {
-          currentProfile = {
-            uid: currentUser.uid,
-            email: currentUser.email!,
-            role: 'super_admin',
-            displayName: currentUser.displayName || 'Super Admin',
-            photoURL: currentUser.photoURL || '',
-          };
-          try {
-            const docRef = doc(db, 'users', currentUser.uid);
-            const docSnap = await getDoc(docRef);
-            if (!docSnap.exists()) {
-              await setDoc(docRef, {
-                email: currentUser.email,
-                role: 'super_admin',
-                displayName: currentUser.displayName || 'Super Admin',
-                photoURL: currentUser.photoURL || '',
-                updatedAt: serverTimestamp(),
-                createdAt: serverTimestamp(),
-              });
-            } else {
-              const data = docSnap.data();
-              currentProfile = {
-                uid: currentUser.uid,
-                email: data.email,
-                role: 'super_admin',
-                teamId: data.teamId,
-                displayName: data.displayName || currentUser.displayName,
-                photoURL: data.photoURL || currentUser.photoURL,
-              };
-            }
-          } catch (e) {
-            console.error('Failed to upsert super admin:', e);
-          }
-        } else {
-          try {
-            const docRef = doc(db, 'users', currentUser.uid);
-            const docSnap = await getDoc(docRef);
-            if (docSnap.exists()) {
-              const data = docSnap.data();
-              currentProfile = {
-                uid: currentUser.uid,
-                email: data.email,
-                role: data.role,
-                teamId: data.teamId,
-                displayName: data.displayName,
-                photoURL: data.photoURL,
-              };
-            } else {
-              // Create default team account (pending approval or just view only)
-              // Actually we probably shouldn't auto-create for anyone except admin. Let's make them 'team' by default without teamId
-              const newProfile: UserProfile = {
-                uid: currentUser.uid,
-                email: currentUser.email!,
-                role: 'team',
-                displayName: currentUser.displayName || '',
-                photoURL: currentUser.photoURL || '',
-              };
-              await setDoc(docRef, {
-                email: currentUser.email,
-                role: 'team',
-                displayName: currentUser.displayName,
-                photoURL: currentUser.photoURL,
-                updatedAt: Date.now(),
-                createdAt: Date.now(),
-              });
-              currentProfile = newProfile;
-            }
-          } catch (error) {
-            console.error('Error fetching user profile', error);
-          }
-        }
-        setProfile(currentProfile);
-      } else {
+
+      if (!currentUser) {
         setProfile(null);
+        setLoading(false);
+        return;
       }
-      setLoading(false);
+
+      const userRef = doc(db, 'users', currentUser.uid);
+      const isFounder = currentUser.email === SUPER_ADMIN_EMAIL;
+
+      try {
+        const snapshot = await getDoc(userRef);
+        const data = snapshot.exists() ? snapshot.data() : null;
+
+        if (!data) {
+          // First sign-in → create the profile. Firestore rules require
+          // `createdAt`/`updatedAt` to equal request.time, hence serverTimestamp().
+          const role: UserRole = isFounder ? 'super_admin' : 'team';
+          await setDoc(userRef, {
+            email: currentUser.email,
+            role,
+            displayName: currentUser.displayName || '',
+            photoURL: currentUser.photoURL || '',
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          setProfile({
+            uid: currentUser.uid,
+            email: currentUser.email || '',
+            role,
+            displayName: currentUser.displayName || '',
+            photoURL: currentUser.photoURL || '',
+          });
+        } else {
+          const role = (isFounder ? 'super_admin' : (data.role as UserRole) || 'team') as UserRole;
+          setProfile({
+            uid: currentUser.uid,
+            email: (data.email as string) || currentUser.email || '',
+            role,
+            teamId: (data.teamId as string) || undefined,
+            displayName: (data.displayName as string) || currentUser.displayName || '',
+            photoURL: (data.photoURL as string) || currentUser.photoURL || '',
+          });
+        }
+      } catch (error) {
+        console.error('تعذّر تحميل ملف المستخدم:', error);
+        // Never leave the interface stuck: fall back to a read-only profile.
+        setProfile({
+          uid: currentUser.uid,
+          email: currentUser.email || '',
+          role: isFounder ? 'super_admin' : 'team',
+          displayName: currentUser.displayName || '',
+          photoURL: currentUser.photoURL || '',
+        });
+      } finally {
+        setLoading(false);
+      }
     });
 
     return unsubscribe;
@@ -118,16 +115,22 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   const signInWithGoogle = async () => {
     const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
     await signInWithPopup(auth, provider);
   };
 
-  const logout = () => signOut(auth);
+  const logout = async () => {
+    await signOut(auth);
+    setProfile(null);
+  };
 
-  const isAdmin = profile?.role === 'super_admin'; // Or other management roles depending on needs
+  const role = profile?.role;
+  const isAdmin = role === 'super_admin';
+  const isStaff = !!role && (ADMIN_ROLES as readonly string[]).includes(role);
 
   return (
-    <AuthContext.Provider value={{ user, profile, loading, signInWithGoogle, logout, isAdmin }}>
-      {!loading && children}
+    <AuthContext.Provider value={{ user, profile, loading, signInWithGoogle, logout, isAdmin, isStaff }}>
+      {children}
     </AuthContext.Provider>
   );
 };

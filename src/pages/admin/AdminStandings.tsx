@@ -1,11 +1,23 @@
-import { useState, useEffect } from 'react';
-import { collection, getDocs, doc, updateDoc, serverTimestamp, query, orderBy } from 'firebase/firestore';
+import { useMemo, useState } from 'react';
+import { Calculator, Edit3, RefreshCw, Save, Trophy } from 'lucide-react';
+import { doc, serverTimestamp, updateDoc, writeBatch } from 'firebase/firestore';
 import { db } from '../../firebase';
-import { Trophy, Edit2, Save, X, Activity } from 'lucide-react';
-import { clsx } from 'clsx';
+import { useTournamentData } from '../../hooks/useTournamentData';
+import { buildStandings, computeTeamAggregates } from '../../lib/stats';
+import { firebaseErrorMessage } from '../../lib/utils';
+import { Badge } from '../../components/ui/Badge';
+import { Button } from '../../components/ui/Button';
+import { EmptyState } from '../../components/ui/Feedback';
+import { Field, FormGrid, Input } from '../../components/ui/Form';
+import { GlassCard } from '../../components/ui/GlassCard';
+import { Modal } from '../../components/ui/Modal';
+import { SectionTitle } from '../../components/ui/SectionTitle';
+import { StandingsTable } from '../../components/football/StandingsTable';
+import { TeamBadge } from '../../components/football/Avatars';
+import { useToast } from '../../components/ui/Toast';
 
-interface TeamStats {
-  id: string;
+interface EditState {
+  teamId: string;
   name: string;
   played: number;
   won: number;
@@ -14,296 +26,252 @@ interface TeamStats {
   goalsFor: number;
   goalsAgainst: number;
   points: number;
-  logo?: string;
 }
 
 export const AdminStandings = () => {
-  const [teams, setTeams] = useState<TeamStats[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  
-  const [editForm, setEditForm] = useState({
-    won: 0,
-    drew: 0,
-    lost: 0,
-    goalsFor: 0,
-    goalsAgainst: 0,
-  });
-
+  const { teams, matches, refresh } = useTournamentData();
+  const toast = useToast();
+  const [editing, setEditing] = useState<EditState | null>(null);
   const [saving, setSaving] = useState(false);
+  const [recomputing, setRecomputing] = useState(false);
 
-  useEffect(() => {
-    fetchStandings();
-  }, []);
+  const computed = useMemo(() => buildStandings(teams, matches), [teams, matches]);
+  const finishedMatches = matches.filter((m) => m.status === 'finished').length;
 
-  const fetchStandings = async () => {
-    setLoading(true);
+  const handleRecompute = async () => {
+    const patches = computeTeamAggregates(teams, matches);
+    if (!patches.length) return;
+    setRecomputing(true);
     try {
-      const q = query(collection(db, 'teams'));
-      const snapshot = await getDocs(q);
-      const fetchedTeams: TeamStats[] = [];
-      
-      snapshot.forEach((docSnap) => {
-        const data = docSnap.data();
-        fetchedTeams.push({
-          id: docSnap.id,
-          name: data.name,
-          played: data.played || 0,
-          won: data.won || 0,
-          drew: data.drew || 0,
-          lost: data.lost || 0,
-          goalsFor: data.goalsFor || 0,
-          goalsAgainst: data.goalsAgainst || 0,
-          points: data.points || 0,
-          logo: data.logo,
+      const batch = writeBatch(db);
+      patches.forEach((patch) => {
+        batch.update(doc(db, 'teams', patch.teamId), {
+          played: patch.played,
+          won: patch.won,
+          drew: patch.drew,
+          lost: patch.lost,
+          goalsFor: patch.goalsFor,
+          goalsAgainst: patch.goalsAgainst,
+          points: patch.points,
+          updatedAt: serverTimestamp(),
         });
       });
-
-      // Sort: Points (desc) -> Goal Difference (desc) -> Goals For (desc)
-      fetchedTeams.sort((a, b) => {
-        if (b.points !== a.points) return b.points - a.points;
-        const gdA = a.goalsFor - a.goalsAgainst;
-        const gdB = b.goalsFor - b.goalsAgainst;
-        if (gdB !== gdA) return gdB - gdA;
-        return b.goalsFor - a.goalsFor;
-      });
-
-      setTeams(fetchedTeams);
+      await batch.commit();
+      toast.success('تم تحديث إحصائيات الفرق من نتائج المباريات.');
+      refresh();
     } catch (error) {
-      console.error("Error fetching standings: ", error);
+      toast.error(`${firebaseErrorMessage(error)} — قد تحتاج صلاحية «مدير البطولة».`);
     } finally {
-      setLoading(false);
+      setRecomputing(false);
     }
   };
 
-  const handleEditClick = (team: TeamStats) => {
-    setEditingId(team.id);
-    setEditForm({
-      won: team.won,
-      drew: team.drew,
-      lost: team.lost,
-      goalsFor: team.goalsFor,
-      goalsAgainst: team.goalsAgainst,
-    });
-  };
-
-  const handleCancelEdit = () => {
-    setEditingId(null);
-  };
-
-  const handleSave = async (teamId: string) => {
+  const handleSaveEdit = async () => {
+    if (!editing) return;
+    const played = editing.won + editing.drew + editing.lost;
     setSaving(true);
     try {
-      // Auto-calculate played and points
-      const played = editForm.won + editForm.drew + editForm.lost;
-      const points = (editForm.won * 3) + (editForm.drew * 1);
-
-      await updateDoc(doc(db, 'teams', teamId), {
-        won: editForm.won,
-        drew: editForm.drew,
-        lost: editForm.lost,
-        goalsFor: editForm.goalsFor,
-        goalsAgainst: editForm.goalsAgainst,
-        played: played,
-        points: points,
-        updatedAt: serverTimestamp()
+      await updateDoc(doc(db, 'teams', editing.teamId), {
+        played,
+        won: editing.won,
+        drew: editing.drew,
+        lost: editing.lost,
+        goalsFor: editing.goalsFor,
+        goalsAgainst: editing.goalsAgainst,
+        points: editing.points,
+        updatedAt: serverTimestamp(),
       });
-
-      setEditingId(null);
-      await fetchStandings(); // Re-fetch and re-sort
+      toast.success('تم تحديث إحصائيات الفريق.');
+      setEditing(null);
+      refresh();
     } catch (error) {
-      console.error("Error saving team stats: ", error);
+      toast.error(firebaseErrorMessage(error));
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <div className="space-y-8 max-w-7xl mx-auto">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-heading font-bold text-white mb-2">إدارة جدول الترتيب</h1>
-          <p className="text-zinc-400">تحديث إحصائيات الفرق (فوز، تعادل، خسارة، أهداف). سيتم حساب النقاط وترتيب الجدول تلقائياً.</p>
+    <div className="space-y-7">
+      <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
+        <div className="space-y-1">
+          <h1 className="font-heading text-2xl font-black text-white">جدول الترتيب</h1>
+          <p className="text-sm text-ink-300">
+            الجدول يُحتسب آلياً من نتائج المباريات المعتمدة ({finishedMatches} مباراة منتهية). يمكنك أيضاً تعديل الإحصائيات
+            المخزنة يدوياً.
+          </p>
         </div>
-        <button 
-          onClick={fetchStandings}
-          className="bg-zinc-800 text-white px-5 py-2.5 rounded-xl font-bold text-sm hover:bg-zinc-700 transition-colors flex items-center gap-2"
+        <Button
+          icon={<Calculator className="h-4 w-4" />}
+          loading={recomputing}
+          onClick={() => void handleRecompute()}
         >
-          <Activity className="w-5 h-5" />
-          تحديث البيانات
-        </button>
+          إعادة الاحتساب من النتائج
+        </Button>
       </div>
 
-      {loading ? (
-        <div className="flex justify-center p-12">
-          <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
-        </div>
-      ) : (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-3xl overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-right">
-              <thead className="bg-zinc-950/50 text-zinc-400 uppercase font-heading text-xs">
-                <tr>
-                  <th className="px-6 py-4 rounded-tr-3xl text-center w-16">المركز</th>
-                  <th className="px-6 py-4">الفريق</th>
-                  <th className="px-3 py-4 text-center">لعب</th>
-                  <th className="px-3 py-4 text-center text-accent-green">فاز</th>
-                  <th className="px-3 py-4 text-center text-zinc-300">تعادل</th>
-                  <th className="px-3 py-4 text-center text-accent-red">خسر</th>
-                  <th className="px-3 py-4 text-center">له</th>
-                  <th className="px-3 py-4 text-center">عليه</th>
-                  <th className="px-3 py-4 text-center text-primary font-bold">فارق</th>
-                  <th className="px-3 py-4 text-center font-bold text-white text-base">نقاط</th>
-                  <th className="px-6 py-4 rounded-tl-3xl text-center">إجراء</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-800/50">
-                {teams.map((team, index) => {
-                  const isEditing = editingId === team.id;
-                  const currentPlayed = isEditing ? (editForm.won + editForm.drew + editForm.lost) : team.played;
-                  const currentPoints = isEditing ? ((editForm.won * 3) + editForm.drew) : team.points;
-                  const currentGF = isEditing ? editForm.goalsFor : team.goalsFor;
-                  const currentGA = isEditing ? editForm.goalsAgainst : team.goalsAgainst;
-                  const currentGD = currentGF - currentGA;
+      <GlassCard padding="lg" className="space-y-5">
+        <SectionTitle
+          title="الترتيب الحالي"
+          icon={<Trophy className="h-5 w-5" />}
+          subtitle="النقاط ثم فارق الأهداف ثم الأهداف المسجلة."
+          action={
+            <Badge tone={computed[0]?.computed ? 'emerald' : 'amber'} size="sm">
+              {computed[0]?.computed ? 'محسوب من النتائج' : 'من الإحصائيات المخزنة'}
+            </Badge>
+          }
+        />
+        {computed.length ? (
+          <StandingsTable rows={computed} linkTeams={false} />
+        ) : (
+          <EmptyState title="لا توجد فرق" icon={<Trophy className="h-6 w-6" />} />
+        )}
+      </GlassCard>
 
-                  return (
-                    <tr 
-                      key={team.id} 
-                      className={clsx(
-                        "hover:bg-zinc-800/20 transition-colors",
-                        isEditing && "bg-primary/5"
-                      )}
-                    >
-                      <td className="px-6 py-4 text-center">
-                        <div className={clsx(
-                          "w-8 h-8 rounded-full flex items-center justify-center mx-auto font-bold font-heading",
-                          index === 0 ? "bg-primary text-black" :
-                          index === 1 ? "bg-zinc-300 text-black" :
-                          index === 2 ? "bg-amber-700 text-white" :
-                          "bg-zinc-950 text-zinc-500"
-                        )}>
-                          {index + 1}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-full bg-zinc-950 border border-zinc-800 flex items-center justify-center shrink-0 shadow-inner">
-                            🦅
-                          </div>
-                          <span className="font-bold text-white text-base">{team.name}</span>
-                        </div>
-                      </td>
-                      
-                      {/* لعب */}
-                      <td className="px-3 py-4 text-center font-bold text-zinc-300">
-                        {currentPlayed}
-                      </td>
-
-                      {/* فاز */}
-                      <td className="px-3 py-4 text-center">
-                        {isEditing ? (
-                          <input type="number" min="0" value={editForm.won} onChange={e => setEditForm({...editForm, won: parseInt(e.target.value)||0})} className="w-14 bg-zinc-950 border border-zinc-700 rounded-lg px-2 py-1 text-center text-white focus:border-primary outline-none" />
-                        ) : (
-                          <span className="text-zinc-400">{team.won}</span>
-                        )}
-                      </td>
-
-                      {/* تعادل */}
-                      <td className="px-3 py-4 text-center">
-                        {isEditing ? (
-                          <input type="number" min="0" value={editForm.drew} onChange={e => setEditForm({...editForm, drew: parseInt(e.target.value)||0})} className="w-14 bg-zinc-950 border border-zinc-700 rounded-lg px-2 py-1 text-center text-white focus:border-primary outline-none" />
-                        ) : (
-                          <span className="text-zinc-400">{team.drew}</span>
-                        )}
-                      </td>
-
-                      {/* خسر */}
-                      <td className="px-3 py-4 text-center">
-                        {isEditing ? (
-                          <input type="number" min="0" value={editForm.lost} onChange={e => setEditForm({...editForm, lost: parseInt(e.target.value)||0})} className="w-14 bg-zinc-950 border border-zinc-700 rounded-lg px-2 py-1 text-center text-white focus:border-primary outline-none" />
-                        ) : (
-                          <span className="text-zinc-400">{team.lost}</span>
-                        )}
-                      </td>
-
-                      {/* له */}
-                      <td className="px-3 py-4 text-center">
-                        {isEditing ? (
-                          <input type="number" min="0" value={editForm.goalsFor} onChange={e => setEditForm({...editForm, goalsFor: parseInt(e.target.value)||0})} className="w-14 bg-zinc-950 border border-zinc-700 rounded-lg px-2 py-1 text-center text-white focus:border-primary outline-none" />
-                        ) : (
-                          <span className="text-zinc-400">{team.goalsFor}</span>
-                        )}
-                      </td>
-
-                      {/* عليه */}
-                      <td className="px-3 py-4 text-center">
-                        {isEditing ? (
-                          <input type="number" min="0" value={editForm.goalsAgainst} onChange={e => setEditForm({...editForm, goalsAgainst: parseInt(e.target.value)||0})} className="w-14 bg-zinc-950 border border-zinc-700 rounded-lg px-2 py-1 text-center text-white focus:border-primary outline-none" />
-                        ) : (
-                          <span className="text-zinc-400">{team.goalsAgainst}</span>
-                        )}
-                      </td>
-
-                      {/* فارق الأهداف */}
-                      <td className="px-3 py-4 text-center font-bold" dir="ltr">
-                        <span className={clsx(
-                          currentGD > 0 ? "text-accent-green" : currentGD < 0 ? "text-accent-red" : "text-zinc-500"
-                        )}>
-                          {currentGD > 0 ? `+${currentGD}` : currentGD}
-                        </span>
-                      </td>
-
-                      {/* النقاط */}
-                      <td className="px-3 py-4 text-center">
-                        <span className="text-xl font-heading font-black text-white">
-                          {currentPoints}
-                        </span>
-                      </td>
-
-                      {/* الإجراءات */}
-                      <td className="px-6 py-4 text-center">
-                        {isEditing ? (
-                          <div className="flex items-center justify-center gap-2">
-                            <button 
-                              onClick={() => handleSave(team.id)}
-                              disabled={saving}
-                              className="p-2 bg-primary/20 text-primary hover:bg-primary hover:text-black rounded-lg transition-colors"
-                              title="حفظ"
-                            >
-                              <Save className="w-4 h-4" />
-                            </button>
-                            <button 
-                              onClick={handleCancelEdit}
-                              className="p-2 bg-zinc-800 text-zinc-400 hover:text-white rounded-lg transition-colors"
-                              title="إلغاء"
-                            >
-                              <X className="w-4 h-4" />
-                            </button>
-                          </div>
-                        ) : (
-                          <button 
-                            onClick={() => handleEditClick(team)}
-                            className="p-2 bg-zinc-950 text-zinc-400 border border-zinc-800 hover:text-primary hover:border-primary/50 rounded-lg transition-all mx-auto block"
-                            title="تعديل الإحصائيات"
-                          >
-                            <Edit2 className="w-4 h-4" />
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-
-            {teams.length === 0 && (
-              <div className="text-center py-16 text-zinc-500">
-                لا توجد فرق مضافة حتى الآن لتشكيل جدول الترتيب.
+      <div className="space-y-4">
+        <SectionTitle
+          title="تعديل الإحصائيات المخزنة"
+          icon={<Edit3 className="h-5 w-5" />}
+          subtitle="مفيد عند احتساب نتائج الاحتكام أو العقوبات الإدارية."
+        />
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {computed.map((row) => (
+            <GlassCard key={row.teamId} padding="md" hover className="space-y-4">
+              <div className="flex items-center gap-3">
+                <TeamBadge name={row.name} logo={row.logo} size="sm" />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-bold text-white">{row.name}</p>
+                  <p className="text-[11px] text-ink-300">
+                    {row.played} مباراة · {row.points} نقطة
+                  </p>
+                </div>
+                <Badge tone="gold" size="sm">
+                  #{row.rank}
+                </Badge>
               </div>
-            )}
-          </div>
+              <div className="grid grid-cols-5 gap-1.5 text-center text-[10px]">
+                {[
+                  { label: 'فاز', value: row.won },
+                  { label: 'تعادل', value: row.drew },
+                  { label: 'خسر', value: row.lost },
+                  { label: 'له', value: row.goalsFor },
+                  { label: 'عليه', value: row.goalsAgainst },
+                ].map((item) => (
+                  <div key={item.label} className="rounded-xl border border-white/8 bg-white/4 py-1.5">
+                    <p className="font-heading text-sm font-black text-white">{item.value}</p>
+                    <p className="text-ink-400">{item.label}</p>
+                  </div>
+                ))}
+              </div>
+              <Button
+                size="sm"
+                variant="glass"
+                block
+                icon={<Edit3 className="h-3.5 w-3.5" />}
+                onClick={() =>
+                  setEditing({
+                    teamId: row.teamId,
+                    name: row.name,
+                    played: row.played,
+                    won: row.won,
+                    drew: row.drew,
+                    lost: row.lost,
+                    goalsFor: row.goalsFor,
+                    goalsAgainst: row.goalsAgainst,
+                    points: row.points,
+                  })
+                }
+              >
+                تعديل الإحصائيات
+              </Button>
+            </GlassCard>
+          ))}
         </div>
-      )}
+      </div>
+
+      <GlassCard variant="soft" padding="md" className="flex flex-wrap items-center gap-3 text-xs text-ink-300">
+        <RefreshCw className="h-4 w-4 text-gold-300" />
+        ملاحظة: زر «إعادة الاحتساب» يستبدل الإحصائيات المخزنة بنتيجة احتساب نتائج المباريات المنتهية.
+      </GlassCard>
+
+      <Modal
+        open={!!editing}
+        onClose={() => setEditing(null)}
+        title={editing ? `إحصائيات ${editing.name}` : ''}
+        subtitle="أدخل الأرقام يدوياً — يتم احتساب عدد المباريات تلقائياً (فاز + تعادل + خسر)."
+        icon={<Edit3 className="h-5 w-5" />}
+        footer={
+          <div className="flex justify-end gap-3">
+            <Button variant="ghost" onClick={() => setEditing(null)} disabled={saving}>
+              إلغاء
+            </Button>
+            <Button icon={<Save className="h-4 w-4" />} loading={saving} onClick={() => void handleSaveEdit()}>
+              حفظ
+            </Button>
+          </div>
+        }
+      >
+        {editing && (
+          <div className="space-y-5">
+            <FormGrid>
+              <Field label="عدد الفوز">
+                <Input
+                  type="number"
+                  min={0}
+                  value={editing.won}
+                  onChange={(event) => {
+                    const won = Number(event.target.value) || 0;
+                    setEditing({ ...editing, won, points: won * 3 + editing.drew });
+                  }}
+                />
+              </Field>
+              <Field label="عدد التعادل">
+                <Input
+                  type="number"
+                  min={0}
+                  value={editing.drew}
+                  onChange={(event) => {
+                    const drew = Number(event.target.value) || 0;
+                    setEditing({ ...editing, drew, points: editing.won * 3 + drew });
+                  }}
+                />
+              </Field>
+              <Field label="عدد الخسارة">
+                <Input
+                  type="number"
+                  min={0}
+                  value={editing.lost}
+                  onChange={(event) => setEditing({ ...editing, lost: Number(event.target.value) || 0 })}
+                />
+              </Field>
+              <Field label="الأهداف المسجّلة">
+                <Input
+                  type="number"
+                  min={0}
+                  value={editing.goalsFor}
+                  onChange={(event) => setEditing({ ...editing, goalsFor: Number(event.target.value) || 0 })}
+                />
+              </Field>
+              <Field label="الأهداف المستقبلة">
+                <Input
+                  type="number"
+                  min={0}
+                  value={editing.goalsAgainst}
+                  onChange={(event) => setEditing({ ...editing, goalsAgainst: Number(event.target.value) || 0 })}
+                />
+              </Field>
+              <Field label="النقاط" hint="تُحتسب تلقائياً (3 لكل فوز + 1 لكل تعادل) ويمكن تعديلها يدوياً.">
+                <Input
+                  type="number"
+                  min={0}
+                  value={editing.points}
+                  onChange={(event) => setEditing({ ...editing, points: Number(event.target.value) || 0 })}
+                />
+              </Field>
+            </FormGrid>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 };

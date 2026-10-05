@@ -8,13 +8,13 @@ import {
   Megaphone,
   Menu,
   Shield,
+  Sparkles,
   Trophy,
   Users,
   X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTournamentData } from '../hooks/useTournamentData';
-import { Sparkles } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { ROLE_LABELS } from '../lib/constants';
 import { Button } from '../components/ui/Button';
